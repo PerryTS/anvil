@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.o
+*.ll
+output
+output_*

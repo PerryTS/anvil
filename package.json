@@ -1,0 +1,20 @@
+{
+  "name": "perrysdad",
+  "version": "0.1.0",
+  "description": "Perry compiler in TypeScript with LLVM backend",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/main.ts",
+    "test:hello": "ts-node src/main.ts --test hello --emit-ll -o output",
+    "test:arithmetic": "ts-node src/main.ts --test arithmetic --emit-ll -o output",
+    "test:strings": "ts-node src/main.ts --test strings --emit-ll -o output",
+    "test:functions": "ts-node src/main.ts --test functions --emit-ll -o output",
+    "test:control": "ts-node src/main.ts --test control --emit-ll -o output"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}
