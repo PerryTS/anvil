@@ -216,6 +216,13 @@ export interface TypeCoerceExpr extends Expr {
   toType: Type;
 }
 
+export interface MethodCallExpr extends Expr {
+  kind: ExprKind.MethodCall;
+  object: Expr;
+  method: string;
+  args: Array<Expr>;
+}
+
 export interface Int32Expr extends Expr {
   kind: ExprKind.Int32;
   value: number;

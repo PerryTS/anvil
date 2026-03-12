@@ -45,73 +45,106 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_string_to_upper_case", I64, [I64]);
   mod.declareFunction("js_string_to_lower_case", I64, [I64]);
 
-  // --- Dynamic arithmetic ---
-  mod.declareFunction("js_add", DOUBLE, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_sub", DOUBLE, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_mul", DOUBLE, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_div", DOUBLE, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_mod", DOUBLE, [DOUBLE, DOUBLE]);
+  // --- Dynamic arithmetic (JSValue = repr(transparent) u64 -> passed as i64) ---
+  mod.declareFunction("js_add", I64, [I64, I64]);
+  mod.declareFunction("js_sub", I64, [I64, I64]);
+  mod.declareFunction("js_mul", I64, [I64, I64]);
+  mod.declareFunction("js_div", I64, [I64, I64]);
+  mod.declareFunction("js_mod", I64, [I64, I64]);
 
-  // --- Comparison ---
-  // js_jsvalue_equals(f64, f64) -> i32: strict equality (0 or 1)
+  // --- Comparison (these take f64 directly, NOT JSValue) ---
   mod.declareFunction("js_jsvalue_equals", I32, [DOUBLE, DOUBLE]);
-  // js_jsvalue_compare(f64, f64) -> i32: -1, 0, or 1
   mod.declareFunction("js_jsvalue_compare", I32, [DOUBLE, DOUBLE]);
-  // js_eq(f64, f64) -> f64: returns NaN-boxed boolean
-  mod.declareFunction("js_eq", DOUBLE, [DOUBLE, DOUBLE]);
+  // js_eq takes JSValue params
+  mod.declareFunction("js_eq", I64, [I64, I64]);
 
   // --- Type checks ---
   mod.declareFunction("js_is_truthy", I32, [DOUBLE]);
   mod.declareFunction("js_typeof", I64, [DOUBLE]);
 
   // --- Object ---
-  mod.declareFunction("js_object_alloc", I64, [I32, I32]);
-  mod.declareFunction("js_object_set_field_f64", VOID, [I64, I32, DOUBLE]);
-  mod.declareFunction("js_object_get_field_f64", DOUBLE, [I64, I32]);
-  mod.declareFunction("js_object_get_field_count", I32, [I64]);
+  // js_object_alloc(class_id: u32, field_count: u32) -> *mut ObjectHeader
+  mod.declareFunction("js_object_alloc", PTR, [I32, I32]);
+  // js_object_get_field_f64(obj: *const ObjectHeader, field_index: u32) -> f64
+  mod.declareFunction("js_object_get_field_f64", DOUBLE, [PTR, I32]);
+  // js_object_set_field_f64(obj: *mut ObjectHeader, field_index: u32, value: f64)
+  mod.declareFunction("js_object_set_field_f64", VOID, [PTR, I32, DOUBLE]);
 
   // --- Array ---
-  mod.declareFunction("js_array_alloc", I64, [I32]);
-  mod.declareFunction("js_array_get", DOUBLE, [I64, I32]);
-  mod.declareFunction("js_array_set", VOID, [I64, I32, DOUBLE]);
-  mod.declareFunction("js_array_push", VOID, [I64, DOUBLE]);
-  mod.declareFunction("js_array_length", I32, [I64]);
-  mod.declareFunction("js_array_pop", DOUBLE, [I64]);
-  mod.declareFunction("js_array_splice", I64, [I64, I32, I32]);
-  mod.declareFunction("js_array_slice", I64, [I64, I32, I32]);
-  mod.declareFunction("js_array_index_of", I32, [I64, DOUBLE]);
+  // js_array_alloc(capacity: u32) -> *mut ArrayHeader
+  mod.declareFunction("js_array_alloc", PTR, [I32]);
+  // js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64
+  mod.declareFunction("js_array_get_f64", DOUBLE, [PTR, I32]);
+  // js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64)
+  mod.declareFunction("js_array_set_f64", VOID, [PTR, I32, DOUBLE]);
+  // js_array_push_f64(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader
+  mod.declareFunction("js_array_push_f64", PTR, [PTR, DOUBLE]);
+  // js_array_length(arr: *const ArrayHeader) -> u32
+  mod.declareFunction("js_array_length", I32, [PTR]);
+  // js_array_pop_f64(arr: *mut ArrayHeader) -> f64
+  mod.declareFunction("js_array_pop_f64", DOUBLE, [PTR]);
+  // js_array_shift_f64(arr: *mut ArrayHeader) -> f64
+  mod.declareFunction("js_array_shift_f64", DOUBLE, [PTR]);
+  // js_array_splice(arr: *mut ArrayHeader, start: i32, delete_count: i32) -> *mut ArrayHeader
+  mod.declareFunction("js_array_splice", PTR, [PTR, I32, I32]);
+  // js_array_slice(arr: *const ArrayHeader, start: i32, end: i32) -> *mut ArrayHeader
+  mod.declareFunction("js_array_slice", PTR, [PTR, I32, I32]);
+  // js_array_indexOf_f64(arr: *const ArrayHeader, value: f64) -> i32
+  mod.declareFunction("js_array_indexOf_f64", I32, [PTR, DOUBLE]);
+  // js_array_includes_f64(arr: *const ArrayHeader, value: f64) -> i32
+  mod.declareFunction("js_array_includes_f64", I32, [PTR, DOUBLE]);
+  // js_array_join(arr: *const ArrayHeader, separator: *const StringHeader) -> *mut StringHeader
+  mod.declareFunction("js_array_join", PTR, [PTR, PTR]);
+  // js_array_concat(arr1, arr2) -> *mut ArrayHeader
+  mod.declareFunction("js_array_concat", PTR, [PTR, PTR]);
 
   // --- Closure ---
-  mod.declareFunction("js_closure_alloc", I64, [PTR, I32]);
-  mod.declareFunction("js_closure_set_capture_f64", VOID, [I64, I32, DOUBLE]);
-  mod.declareFunction("js_closure_get_capture_f64", DOUBLE, [I64, I32]);
-  mod.declareFunction("js_closure_call0", DOUBLE, [I64]);
-  mod.declareFunction("js_closure_call1", DOUBLE, [I64, DOUBLE]);
-  mod.declareFunction("js_closure_call2", DOUBLE, [I64, DOUBLE, DOUBLE]);
-  mod.declareFunction("js_closure_call3", DOUBLE, [I64, DOUBLE, DOUBLE, DOUBLE]);
+  // js_closure_alloc(func_ptr: *const u8, capture_count: u32) -> *mut ClosureHeader
+  mod.declareFunction("js_closure_alloc", PTR, [PTR, I32]);
+  // js_closure_set_capture_f64(closure: *mut ClosureHeader, index: u32, value: f64)
+  mod.declareFunction("js_closure_set_capture_f64", VOID, [PTR, I32, DOUBLE]);
+  // js_closure_get_capture_f64(closure: *const ClosureHeader, index: u32) -> f64
+  mod.declareFunction("js_closure_get_capture_f64", DOUBLE, [PTR, I32]);
+  // js_closure_callN(closure: *const ClosureHeader, args...) -> f64
+  mod.declareFunction("js_closure_call0", DOUBLE, [PTR]);
+  mod.declareFunction("js_closure_call1", DOUBLE, [PTR, DOUBLE]);
+  mod.declareFunction("js_closure_call2", DOUBLE, [PTR, DOUBLE, DOUBLE]);
+  mod.declareFunction("js_closure_call3", DOUBLE, [PTR, DOUBLE, DOUBLE, DOUBLE]);
+  mod.declareFunction("js_closure_call4", DOUBLE, [PTR, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+  mod.declareFunction("js_closure_call5", DOUBLE, [PTR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
 
   // --- Map ---
-  mod.declareFunction("js_map_new", I64, []);
-  mod.declareFunction("js_map_set", VOID, [I64, DOUBLE, DOUBLE]);
-  mod.declareFunction("js_map_get", DOUBLE, [I64, DOUBLE]);
-  mod.declareFunction("js_map_has", I32, [I64, DOUBLE]);
-  mod.declareFunction("js_map_delete", I32, [I64, DOUBLE]);
-  mod.declareFunction("js_map_size", I32, [I64]);
+  // js_map_alloc(capacity: u32) -> *mut MapHeader
+  mod.declareFunction("js_map_alloc", PTR, [I32]);
+  // js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut MapHeader
+  mod.declareFunction("js_map_set", PTR, [PTR, DOUBLE, DOUBLE]);
+  // js_map_get(map: *const MapHeader, key: f64) -> f64
+  mod.declareFunction("js_map_get", DOUBLE, [PTR, DOUBLE]);
+  // js_map_has(map: *const MapHeader, key: f64) -> i32
+  mod.declareFunction("js_map_has", I32, [PTR, DOUBLE]);
+  // js_map_delete(map: *mut MapHeader, key: f64) -> i32
+  mod.declareFunction("js_map_delete", I32, [PTR, DOUBLE]);
+  // js_map_size(map: *const MapHeader) -> u32
+  mod.declareFunction("js_map_size", I32, [PTR]);
 
   // --- Process ---
   mod.declareFunction("js_process_exit", VOID, [I32]);
 
-  // --- Math ---
-  mod.declareFunction("js_math_floor", DOUBLE, [DOUBLE]);
-  mod.declareFunction("js_math_ceil", DOUBLE, [DOUBLE]);
-  mod.declareFunction("js_math_round", DOUBLE, [DOUBLE]);
-  mod.declareFunction("js_math_abs", DOUBLE, [DOUBLE]);
-  mod.declareFunction("js_math_sqrt", DOUBLE, [DOUBLE]);
+  // --- Math (only declare those that exist in the runtime) ---
   mod.declareFunction("js_math_pow", DOUBLE, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_math_min", DOUBLE, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_math_max", DOUBLE, [DOUBLE, DOUBLE]);
   mod.declareFunction("js_math_random", DOUBLE, []);
   mod.declareFunction("js_math_log", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_math_fmod", DOUBLE, [DOUBLE, DOUBLE]);
+  mod.declareFunction("js_math_log10", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_math_log2", DOUBLE, [DOUBLE]);
+  // Use LLVM intrinsics for floor, ceil, round, abs, sqrt
+  mod.declareFunction("llvm.floor.f64", DOUBLE, [DOUBLE]);
+  mod.declareFunction("llvm.ceil.f64", DOUBLE, [DOUBLE]);
+  mod.declareFunction("llvm.round.f64", DOUBLE, [DOUBLE]);
+  mod.declareFunction("llvm.fabs.f64", DOUBLE, [DOUBLE]);
+  mod.declareFunction("llvm.sqrt.f64", DOUBLE, [DOUBLE]);
+  mod.declareFunction("llvm.minnum.f64", DOUBLE, [DOUBLE, DOUBLE]);
+  mod.declareFunction("llvm.maxnum.f64", DOUBLE, [DOUBLE, DOUBLE]);
 
   // --- Error/exceptions ---
   mod.declareFunction("js_throw", VOID, [DOUBLE]);

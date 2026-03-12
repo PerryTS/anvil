@@ -4,3 +4,4 @@ dist/
 *.ll
 output
 output_*
+test/*_out

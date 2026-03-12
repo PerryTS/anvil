@@ -28,9 +28,10 @@ import {
   LocalGetExpr, LocalSetExpr, CallExpr, FuncRefExpr,
   IfExpr, ArrayExpr, ArrayGetExpr, ArraySetExpr,
   ObjectLitExpr, FieldGetExpr, FieldSetExpr,
+  MethodCallExpr,
 } from "../hir/ir";
 import {
-  Type, TypeKind, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE,
+  Type, TypeKind, ArrayType, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE,
   VOID_TYPE, ANY_TYPE, UNDEFINED_TYPE, NULL_TYPE,
   makeFunctionType, makeArrayType, makeUnionType,
 } from "../hir/types";
@@ -40,6 +41,8 @@ interface Scope {
   localTypes: Map<string, Type>;   // name -> type
   functions: Map<string, number>;  // name -> funcId
   funcReturnTypes: Map<string, Type>;  // name -> return type
+  // Track object field layouts: variable name -> field name -> field index
+  fieldLayouts: Map<string, Map<string, number>>;
   parent: Scope | null;
 }
 
@@ -56,7 +59,7 @@ export class Lowerer {
     this.nextLocalId = 0;
     this.nextFuncId = 1;  // 0 is reserved for runtime
     this.functions = [];
-    this.scope = { locals: new Map(), localTypes: new Map(), functions: new Map(), funcReturnTypes: new Map(), parent: null };
+    this.scope = { locals: new Map(), localTypes: new Map(), functions: new Map(), funcReturnTypes: new Map(), fieldLayouts: new Map(), parent: null };
 
     // Map known global functions/methods to runtime FFI names
     this.runtimeFuncs = new Map();
@@ -223,8 +226,33 @@ export class Lowerer {
   }
 
   private lowerVarDecl(decl: VarDeclAst): LetStmt {
-    const ty = decl.typeAnnotation !== null ? this.resolveType(decl.typeAnnotation) : ANY_TYPE;
+    let ty = decl.typeAnnotation !== null ? this.resolveType(decl.typeAnnotation) : ANY_TYPE;
+    // Infer array type from array literal initializer
+    if (ty.kind === TypeKind.Any && decl.init !== null) {
+      if (decl.init.kind === AstExprKind.Array) {
+        ty = makeArrayType(ANY_TYPE);
+      } else if (decl.init.kind === AstExprKind.New) {
+        const newExpr = decl.init as NewExprAst;
+        if (newExpr.callee.kind === AstExprKind.Identifier) {
+          const name = (newExpr.callee as IdentifierExpr).name;
+          if (name === "Map") {
+            ty = { kind: TypeKind.Object } as Type;
+            // Mark as map using a special flag we'll check later
+            (ty as any).isMap = true;
+          }
+        }
+      }
+    }
     const localId = this.allocLocal(decl.name, ty);
+    // Track object field layout if initializer is an object literal
+    if (decl.init !== null && decl.init.kind === AstExprKind.Object) {
+      const objExpr = decl.init as ObjectExprAst;
+      const layout: Map<string, number> = new Map();
+      for (let i = 0; i < objExpr.properties.length; i = i + 1) {
+        layout.set(objExpr.properties[i].key, i);
+      }
+      this.scope.fieldLayouts.set(decl.name, layout);
+    }
     return {
       kind: StmtKind.Let,
       localId: localId,
@@ -464,7 +492,19 @@ export class Lowerer {
     }
 
     if (expr.kind === AstExprKind.New) {
-      // TODO: lower new expressions
+      const e = expr as NewExprAst;
+      // new Map() -> call js_map_alloc
+      if (e.callee.kind === AstExprKind.Identifier) {
+        const name = (e.callee as IdentifierExpr).name;
+        if (name === "Map") {
+          return {
+            kind: ExprKind.Call,
+            ty: ANY_TYPE,
+            callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: "$map_alloc" } as FuncRefExpr,
+            args: [],
+          } as CallExpr;
+        }
+      }
       return { kind: ExprKind.Undefined, ty: UNDEFINED_TYPE } as UndefinedExpr;
     }
 
@@ -630,9 +670,11 @@ export class Lowerer {
   }
 
   private lowerCall(expr: CallExprAst): Expr {
-    // Special case: console.log(x) -> js_console_log_dynamic(x) or js_console_log_number(x)
+    // Special case: method calls on known objects
     if (expr.callee.kind === AstExprKind.Member) {
       const member = expr.callee as MemberExprAst;
+
+      // Built-in global method calls: console.log, Math.floor, etc.
       if (member.object.kind === AstExprKind.Identifier) {
         const obj = member.object as IdentifierExpr;
         const runtimeName = this.resolveBuiltinCall(obj.name, member.property, expr.args.length);
@@ -648,6 +690,54 @@ export class Lowerer {
             args: args,
           } as CallExpr;
         }
+
+        // Method calls on known typed locals (arrays, maps)
+        const localType = this.lookupLocalType(obj.name);
+        if (this.isArrayMethod(member.property) && (localType.kind === TypeKind.Array || localType.kind === TypeKind.Any)) {
+          const objExpr = this.lowerExpr(member.object);
+          const args: Array<Expr> = [];
+          for (let i = 0; i < expr.args.length; i = i + 1) {
+            args.push(this.lowerExpr(expr.args[i]));
+          }
+          return {
+            kind: ExprKind.MethodCall,
+            ty: ANY_TYPE,
+            object: objExpr,
+            method: member.property,
+            args: args,
+          } as MethodCallExpr;
+        }
+
+        if (this.isMapMethod(member.property) && ((localType as any).isMap || localType.kind === TypeKind.Any)) {
+          const objExpr = this.lowerExpr(member.object);
+          const args: Array<Expr> = [];
+          for (let i = 0; i < expr.args.length; i = i + 1) {
+            args.push(this.lowerExpr(expr.args[i]));
+          }
+          return {
+            kind: ExprKind.MethodCall,
+            ty: ANY_TYPE,
+            object: objExpr,
+            method: member.property,
+            args: args,
+          } as MethodCallExpr;
+        }
+      }
+
+      // Method calls on non-identifier objects (e.g., arr.slice(0).push(x))
+      const objExpr = this.lowerExpr(member.object);
+      if (this.isArrayMethod(member.property) || this.isMapMethod(member.property)) {
+        const args: Array<Expr> = [];
+        for (let i = 0; i < expr.args.length; i = i + 1) {
+          args.push(this.lowerExpr(expr.args[i]));
+        }
+        return {
+          kind: ExprKind.MethodCall,
+          ty: ANY_TYPE,
+          object: objExpr,
+          method: member.property,
+          args: args,
+        } as MethodCallExpr;
       }
     }
 
@@ -668,6 +758,17 @@ export class Lowerer {
     return { kind: ExprKind.Call, ty: callRetType, callee: callee, args: args } as CallExpr;
   }
 
+  private isArrayMethod(name: string): boolean {
+    return name === "push" || name === "pop" || name === "shift" ||
+           name === "indexOf" || name === "includes" ||
+           name === "slice" || name === "splice" || name === "concat";
+  }
+
+  private isMapMethod(name: string): boolean {
+    return name === "set" || name === "get" || name === "has" ||
+           name === "delete" || name === "size";
+  }
+
   private resolveBuiltinCall(objName: string, methodName: string, argCount: number): string | null {
     if (objName === "console" && methodName === "log") {
       return "js_console_log_dynamic";
@@ -679,14 +780,14 @@ export class Lowerer {
       return "js_console_warn_dynamic";
     }
     if (objName === "Math") {
-      if (methodName === "floor") return "js_math_floor";
-      if (methodName === "ceil") return "js_math_ceil";
-      if (methodName === "round") return "js_math_round";
-      if (methodName === "abs") return "js_math_abs";
-      if (methodName === "sqrt") return "js_math_sqrt";
+      if (methodName === "floor") return "llvm.floor.f64";
+      if (methodName === "ceil") return "llvm.ceil.f64";
+      if (methodName === "round") return "llvm.round.f64";
+      if (methodName === "abs") return "llvm.fabs.f64";
+      if (methodName === "sqrt") return "llvm.sqrt.f64";
       if (methodName === "pow") return "js_math_pow";
-      if (methodName === "min") return "js_math_min";
-      if (methodName === "max") return "js_math_max";
+      if (methodName === "min") return "llvm.minnum.f64";
+      if (methodName === "max") return "llvm.maxnum.f64";
       if (methodName === "random") return "js_math_random";
       if (methodName === "log") return "js_math_log";
     }
@@ -697,22 +798,67 @@ export class Lowerer {
   }
 
   private lowerMember(expr: MemberExprAst): Expr {
+    // Handle .length on arrays -> MethodCall with no args
+    if (expr.property === "length" && expr.object.kind === AstExprKind.Identifier) {
+      const ident = expr.object as IdentifierExpr;
+      const ty = this.lookupLocalType(ident.name);
+      if (ty.kind === TypeKind.Array) {
+        const obj = this.lowerExpr(expr.object);
+        return {
+          kind: ExprKind.MethodCall,
+          ty: NUMBER_TYPE,
+          object: obj,
+          method: "length",
+          args: [],
+        } as MethodCallExpr;
+      }
+    }
+
+    // Handle .size on maps -> MethodCall with no args
+    if (expr.property === "size" && expr.object.kind === AstExprKind.Identifier) {
+      const ident = expr.object as IdentifierExpr;
+      const ty = this.lookupLocalType(ident.name);
+      if ((ty as any).isMap) {
+        const obj = this.lowerExpr(expr.object);
+        return {
+          kind: ExprKind.MethodCall,
+          ty: NUMBER_TYPE,
+          object: obj,
+          method: "size",
+          args: [],
+        } as MethodCallExpr;
+      }
+    }
+
     const obj = this.lowerExpr(expr.object);
     // Property access -> field get with compile-time field index
-    // For now, use a placeholder field index of 0
+    let fieldIndex = 0;
+    if (expr.object.kind === AstExprKind.Identifier) {
+      const ident = expr.object as IdentifierExpr;
+      fieldIndex = this.lookupFieldIndex(ident.name, expr.property);
+    }
     return {
       kind: ExprKind.FieldGet,
       ty: ANY_TYPE,
       object: obj,
       field: expr.property,
-      fieldIndex: 0,
+      fieldIndex: fieldIndex,
     } as FieldGetExpr;
   }
 
   private lowerIndex(expr: IndexExprAst): Expr {
     const obj = this.lowerExpr(expr.object);
     const index = this.lowerExpr(expr.index);
-    return { kind: ExprKind.ArrayGet, ty: ANY_TYPE, array: obj, index: index } as ArrayGetExpr;
+    // Infer element type from the array's type
+    let elemType: Type = ANY_TYPE;
+    if (expr.object.kind === AstExprKind.Identifier) {
+      const ident = expr.object as IdentifierExpr;
+      const arrType = this.lookupLocalType(ident.name);
+      if (arrType.kind === TypeKind.Array) {
+        elemType = (arrType as ArrayType).elementType;
+      }
+    }
+    return { kind: ExprKind.ArrayGet, ty: elemType, array: obj, index: index } as ArrayGetExpr;
   }
 
   private lowerAssign(expr: AssignExprAst): Expr {
@@ -734,12 +880,17 @@ export class Lowerer {
     if (expr.target.kind === AstExprKind.Member) {
       const member = expr.target as MemberExprAst;
       const obj = this.lowerExpr(member.object);
+      let fieldIndex = 0;
+      if (member.object.kind === AstExprKind.Identifier) {
+        const ident = member.object as IdentifierExpr;
+        fieldIndex = this.lookupFieldIndex(ident.name, member.property);
+      }
       return {
         kind: ExprKind.FieldSet,
         ty: value.ty,
         object: obj,
         field: member.property,
-        fieldIndex: 0,
+        fieldIndex: fieldIndex,
         value: value,
       } as FieldSetExpr;
     }
@@ -843,7 +994,7 @@ export class Lowerer {
   // --- Scope management ---
 
   private pushScope(): void {
-    this.scope = { locals: new Map(), localTypes: new Map(), functions: new Map(), funcReturnTypes: new Map(), parent: this.scope };
+    this.scope = { locals: new Map(), localTypes: new Map(), functions: new Map(), funcReturnTypes: new Map(), fieldLayouts: new Map(), parent: this.scope };
   }
 
   private lookupFuncReturnType(name: string): Type {
@@ -888,6 +1039,19 @@ export class Lowerer {
       scope = scope.parent;
     }
     return ANY_TYPE;
+  }
+
+  private lookupFieldIndex(varName: string, fieldName: string): number {
+    let scope: Scope | null = this.scope;
+    while (scope !== null) {
+      const layout = scope.fieldLayouts.get(varName);
+      if (layout !== undefined) {
+        const idx = layout.get(fieldName);
+        if (idx !== undefined) return idx;
+      }
+      scope = scope.parent;
+    }
+    return 0; // fallback to 0
   }
 
   private lookupFunction(name: string): number | null {
