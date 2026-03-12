@@ -5,6 +5,8 @@ import * as path from "path";
 import { HirModule } from "../hir/ir";
 import { compileModule } from "../codegen/compiler";
 import { linkAll, getDefaultRuntimePath } from "./linker";
+import { Parser } from "../parser/parser";
+import { Lowerer } from "../hir/lower";
 
 export interface CompileOptions {
   inputFile: string;
@@ -14,8 +16,19 @@ export interface CompileOptions {
 }
 
 export function compile(options: CompileOptions): void {
-  // TODO: Phase 2 will add real parsing. For now, we expect a hardcoded HIR module.
-  throw new Error("Real compilation not yet implemented. Use compileFromHIR() instead.");
+  // Step 1: Parse
+  console.log("[perrysdad] Parsing " + options.inputFile + "...");
+  const source = fs.readFileSync(options.inputFile, "utf-8");
+  const parser = new Parser(source, path.basename(options.inputFile));
+  const ast = parser.parse();
+
+  // Step 2: Lower AST -> HIR
+  console.log("[perrysdad] Lowering to HIR...");
+  const lowerer = new Lowerer();
+  const hirModule = lowerer.lower(ast);
+
+  // Step 3: Codegen + link
+  compileFromHIR(hirModule, options);
 }
 
 // Compile from a pre-built HIR module (used in Phase 0-1 before parser exists)

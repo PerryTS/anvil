@@ -27,9 +27,9 @@ export class LLBlock {
     this.instructions.push("  " + line);
   }
 
-  // Allocate a new SSA register name
+  // Allocate a new SSA register name (using function-wide counter for uniqueness)
   private reg(): string {
-    return "%" + this.nextReg();
+    return "%r" + this.nextReg();
   }
 
   // --- Arithmetic (double) ---

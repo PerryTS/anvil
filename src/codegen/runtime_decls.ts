@@ -53,12 +53,12 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_mod", DOUBLE, [DOUBLE, DOUBLE]);
 
   // --- Comparison ---
-  mod.declareFunction("js_strict_eq", I32, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_strict_ne", I32, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_less_than", I32, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_less_than_eq", I32, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_greater_than", I32, [DOUBLE, DOUBLE]);
-  mod.declareFunction("js_greater_than_eq", I32, [DOUBLE, DOUBLE]);
+  // js_jsvalue_equals(f64, f64) -> i32: strict equality (0 or 1)
+  mod.declareFunction("js_jsvalue_equals", I32, [DOUBLE, DOUBLE]);
+  // js_jsvalue_compare(f64, f64) -> i32: -1, 0, or 1
+  mod.declareFunction("js_jsvalue_compare", I32, [DOUBLE, DOUBLE]);
+  // js_eq(f64, f64) -> f64: returns NaN-boxed boolean
+  mod.declareFunction("js_eq", DOUBLE, [DOUBLE, DOUBLE]);
 
   // --- Type checks ---
   mod.declareFunction("js_is_truthy", I32, [DOUBLE]);

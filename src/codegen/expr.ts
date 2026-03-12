@@ -276,26 +276,37 @@ function compileCompare(ctx: CompilerContext, block: LLBlock, expr: CompareExpr)
   }
 
   // Dynamic comparison via runtime
-  let runtimeResult: string;
+  // Use js_jsvalue_equals for ===/!== and js_jsvalue_compare for </>/<=/>=
   if (expr.op === CompareOp.Eq || expr.op === CompareOp.StrictEq) {
-    runtimeResult = block.call(I32, "js_strict_eq", [[DOUBLE, left], [DOUBLE, right]]);
-  } else if (expr.op === CompareOp.Ne || expr.op === CompareOp.StrictNe) {
-    runtimeResult = block.call(I32, "js_strict_ne", [[DOUBLE, left], [DOUBLE, right]]);
-  } else if (expr.op === CompareOp.Lt) {
-    runtimeResult = block.call(I32, "js_less_than", [[DOUBLE, left], [DOUBLE, right]]);
-  } else if (expr.op === CompareOp.Le) {
-    runtimeResult = block.call(I32, "js_less_than_eq", [[DOUBLE, left], [DOUBLE, right]]);
-  } else if (expr.op === CompareOp.Gt) {
-    runtimeResult = block.call(I32, "js_greater_than", [[DOUBLE, left], [DOUBLE, right]]);
-  } else {
-    runtimeResult = block.call(I32, "js_greater_than_eq", [[DOUBLE, left], [DOUBLE, right]]);
+    const eqResult = block.call(I32, "js_jsvalue_equals", [[DOUBLE, left], [DOUBLE, right]]);
+    const isTrue = block.icmpNe(I32, eqResult, "0");
+    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
+    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
+  }
+  if (expr.op === CompareOp.Ne || expr.op === CompareOp.StrictNe) {
+    const eqResult = block.call(I32, "js_jsvalue_equals", [[DOUBLE, left], [DOUBLE, right]]);
+    const isFalse = block.icmpEq(I32, eqResult, "0");
+    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
+    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    return [block, block.select(I1, isFalse, DOUBLE, trueVal, falseVal)];
   }
 
-  const isTrue = block.icmpNe(I32, runtimeResult, "0");
+  // js_jsvalue_compare returns -1 (lt), 0 (eq), 1 (gt)
+  const cmpResult = block.call(I32, "js_jsvalue_compare", [[DOUBLE, left], [DOUBLE, right]]);
+  let cond: string;
+  if (expr.op === CompareOp.Lt) {
+    cond = block.icmpSlt(I32, cmpResult, "0");
+  } else if (expr.op === CompareOp.Le) {
+    cond = block.icmpSle(I32, cmpResult, "0");
+  } else if (expr.op === CompareOp.Gt) {
+    cond = block.icmpSgt(I32, cmpResult, "0");
+  } else {
+    cond = block.icmpSge(I32, cmpResult, "0");
+  }
   const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
   const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
-  const selected = block.select(I1, isTrue, DOUBLE, trueVal, falseVal);
-  return [block, selected];
+  return [block, block.select(I1, cond, DOUBLE, trueVal, falseVal)];
 }
 
 function compileLogical(ctx: CompilerContext, block: LLBlock, expr: LogicalExpr): [LLBlock, string] {
@@ -352,10 +363,11 @@ function compileCall(ctx: CompilerContext, block: LLBlock, expr: CallExpr): [LLB
     for (let i = 0; i < argVals.length; i = i + 1) {
       args.push([DOUBLE, argVals[i][0]]);
     }
-    // Check return type from HIR function info, or from the FuncRef's type annotation
+    // Check return type from HIR function info, from the FuncRef's type annotation, or from known runtime function names
     const retType = funcRef.ty;
     const isVoidReturn = (funcInfo !== null && (funcInfo.returnType.kind === TypeKind.Void || funcInfo.returnType.kind === TypeKind.Undefined))
-      || (retType.kind === TypeKind.Function && ((retType as any).returnType.kind === TypeKind.Void || (retType as any).returnType.kind === TypeKind.Undefined));
+      || (retType.kind === TypeKind.Function && ((retType as any).returnType.kind === TypeKind.Void || (retType as any).returnType.kind === TypeKind.Undefined))
+      || isVoidRuntimeFunction(funcName);
     if (isVoidReturn) {
       block.callVoid(funcName, args);
       const undef = block.bitcastI64ToDouble(i64Literal(TAG_UNDEFINED));
@@ -413,4 +425,27 @@ function compileIfExpr(ctx: CompilerContext, block: LLBlock, expr: IfExpr): [LLB
   ]);
 
   return [mergeBlock, phi];
+}
+
+// Known void-returning runtime functions
+const VOID_RUNTIME_FUNCTIONS: Map<string, boolean> = new Map();
+VOID_RUNTIME_FUNCTIONS.set("js_console_log_number", true);
+VOID_RUNTIME_FUNCTIONS.set("js_console_log_dynamic", true);
+VOID_RUNTIME_FUNCTIONS.set("js_console_error_number", true);
+VOID_RUNTIME_FUNCTIONS.set("js_console_error_dynamic", true);
+VOID_RUNTIME_FUNCTIONS.set("js_console_warn_number", true);
+VOID_RUNTIME_FUNCTIONS.set("js_console_warn_dynamic", true);
+VOID_RUNTIME_FUNCTIONS.set("js_gc_init", true);
+VOID_RUNTIME_FUNCTIONS.set("js_object_set_field_f64", true);
+VOID_RUNTIME_FUNCTIONS.set("js_array_set", true);
+VOID_RUNTIME_FUNCTIONS.set("js_array_push", true);
+VOID_RUNTIME_FUNCTIONS.set("js_closure_set_capture_f64", true);
+VOID_RUNTIME_FUNCTIONS.set("js_map_set", true);
+VOID_RUNTIME_FUNCTIONS.set("js_process_exit", true);
+VOID_RUNTIME_FUNCTIONS.set("js_throw", true);
+VOID_RUNTIME_FUNCTIONS.set("js_try_exit", true);
+VOID_RUNTIME_FUNCTIONS.set("js_stdlib_init_dispatch", true);
+
+function isVoidRuntimeFunction(name: string): boolean {
+  return VOID_RUNTIME_FUNCTIONS.has(name);
 }

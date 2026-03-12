@@ -14,7 +14,7 @@ import {
   Type, TypeKind, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE,
   VOID_TYPE, ANY_TYPE, makeFunctionType,
 } from "./hir/types";
-import { compileFromHIR, CompileOptions } from "./driver/compile";
+import { compile, compileFromHIR, CompileOptions } from "./driver/compile";
 
 function main(): void {
   const args = process.argv.slice(2);
@@ -23,6 +23,7 @@ function main(): void {
   let runtimePath = "";
   let emitLL = false;
   let testMode = "";
+  let inputFile = "";
 
   let i = 0;
   while (i < args.length) {
@@ -38,6 +39,9 @@ function main(): void {
     } else if (args[i] === "--test" && i + 1 < args.length) {
       testMode = args[i + 1];
       i = i + 2;
+    } else if (args[i].charAt(0) !== "-" && inputFile === "") {
+      inputFile = args[i];
+      i = i + 1;
     } else {
       i = i + 1;
     }
@@ -64,7 +68,11 @@ function main(): void {
     emitLL: emitLL,
   };
 
-  if (testMode === "hello") {
+  if (inputFile !== "") {
+    // Compile a real .ts file
+    options.inputFile = inputFile;
+    compile(options);
+  } else if (testMode === "hello") {
     // Phase 0: console.log(42)
     compileFromHIR(buildHelloWorld(), options);
   } else if (testMode === "arithmetic") {
