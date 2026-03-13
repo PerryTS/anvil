@@ -1,4 +1,4 @@
-// Type system for perrysdad HIR (mirrors perry-types)
+// Type system for anvil HIR (mirrors perry-types)
 
 export const enum TypeKind {
   Number = 0,
@@ -40,6 +40,8 @@ export interface UnionType extends Type {
 export interface ObjectType extends Type {
   kind: TypeKind.Object;
   fields: Map<string, Type>;
+  interfaceName: string;
+  isMap: boolean;
 }
 
 export const NUMBER_TYPE: Type = { kind: TypeKind.Number };
@@ -65,7 +67,7 @@ export function makeUnionType(members: Array<Type>): UnionType {
 }
 
 export function makeObjectType(fields: Map<string, Type>): ObjectType {
-  return { kind: TypeKind.Object, fields: fields };
+  return { kind: TypeKind.Object, fields: fields, interfaceName: "", isMap: false };
 }
 
 export function isDynamic(ty: Type): boolean {

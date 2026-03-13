@@ -3,19 +3,31 @@
 // Uses alloca/load/store for locals to avoid SSA phi nodes.
 // LLVM's mem2reg pass will optimize these into SSA form.
 
-import { LLVMType, DOUBLE, I64, I32, I1, PTR, VOID } from "./types";
+import { LLVMType } from "./types";
+
+// Shared counter object to avoid closure issues with Perry
+export class RegCounter {
+  value: number;
+  constructor() {
+    this.value = 0;
+  }
+  next(): number {
+    this.value = this.value + 1;
+    return this.value;
+  }
+}
 
 export class LLBlock {
   readonly label: string;
   private instructions: Array<string>;
   private terminated: boolean;
-  private nextReg: () => number;
+  private counter: RegCounter;
 
-  constructor(label: string, nextReg: () => number) {
+  constructor(label: string, counter: RegCounter) {
     this.label = label;
     this.instructions = [];
     this.terminated = false;
-    this.nextReg = nextReg;
+    this.counter = counter;
   }
 
   isTerminated(): boolean {
@@ -24,12 +36,16 @@ export class LLBlock {
 
   // Emit a raw instruction line
   private emit(line: string): void {
-    this.instructions.push("  " + line);
+    let arr = this.instructions;
+    arr.push("  " + line);
+    this.instructions = arr;
   }
 
   // Allocate a new SSA register name (using function-wide counter for uniqueness)
   private reg(): string {
-    return "%r" + this.nextReg();
+    let c: RegCounter = this.counter;
+    let n: number = c.next();
+    return "%r" + n;
   }
 
   // --- Arithmetic (double) ---
@@ -269,7 +285,12 @@ export class LLBlock {
   callIndirect(retTy: LLVMType, fnPtr: string, args: Array<[LLVMType, string]>): string {
     const r = this.reg();
     const argStr = formatArgs(args);
-    const paramTypes = args.map(function(a: [LLVMType, string]): string { return a[0]; }).join(", ");
+    let ptParts: Array<string> = [];
+    for (let j = 0; j < args.length; j = j + 1) {
+      let a: [LLVMType, string] = args[j];
+      ptParts.push(a[0]);
+    }
+    const paramTypes = ptParts.join(", ");
     this.emit(r + " = call " + retTy + " (" + paramTypes + ")* " + fnPtr + "(" + argStr + ")");
     return r;
   }
@@ -305,7 +326,14 @@ export class LLBlock {
 
   gep(baseTy: LLVMType, ptr: string, indices: Array<[LLVMType, string]>): string {
     const r = this.reg();
-    const idxStr = indices.map(function(idx: [LLVMType, string]): string { return idx[0] + " " + idx[1]; }).join(", ");
+    let idxParts: Array<string> = [];
+    for (let j = 0; j < indices.length; j = j + 1) {
+      let idx: [LLVMType, string] = indices[j];
+      let it: string = idx[0];
+      let iv: string = idx[1];
+      idxParts.push(it + " " + iv);
+    }
+    const idxStr = idxParts.join(", ");
     this.emit(r + " = getelementptr " + baseTy + ", ptr " + ptr + ", " + idxStr);
     return r;
   }
@@ -314,7 +342,14 @@ export class LLBlock {
 
   phi(ty: LLVMType, incoming: Array<[string, string]>): string {
     const r = this.reg();
-    const pairs = incoming.map(function(pair: [string, string]): string { return "[ " + pair[0] + ", %" + pair[1] + " ]"; }).join(", ");
+    let pairParts: Array<string> = [];
+    for (let j = 0; j < incoming.length; j = j + 1) {
+      let pair: [string, string] = incoming[j];
+      let pv: string = pair[0];
+      let pl: string = pair[1];
+      pairParts.push("[ " + pv + ", %" + pl + " ]");
+    }
+    const pairs = pairParts.join(", ");
     this.emit(r + " = phi " + ty + " " + pairs);
     return r;
   }
@@ -322,10 +357,20 @@ export class LLBlock {
   // --- Output ---
 
   toIR(): string {
-    return this.label + ":\n" + this.instructions.join("\n");
+    let lbl: string = this.label;
+    let instrs: Array<string> = this.instructions;
+    let body: string = instrs.join("\n");
+    return lbl + ":\n" + body;
   }
 }
 
 function formatArgs(args: Array<[LLVMType, string]>): string {
-  return args.map(function(a: [LLVMType, string]): string { return a[0] + " " + a[1]; }).join(", ");
+  let parts: Array<string> = [];
+  for (let i = 0; i < args.length; i = i + 1) {
+    let a: [LLVMType, string] = args[i];
+    let at: string = a[0];
+    let av: string = a[1];
+    parts.push(at + " " + av);
+  }
+  return parts.join(", ");
 }

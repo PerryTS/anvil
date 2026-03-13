@@ -173,6 +173,6 @@ KEYWORDS.set("of", TokenKind.Of);
 KEYWORDS.set("instanceof", TokenKind.Instanceof);
 KEYWORDS.set("delete", TokenKind.Delete);
 
-export function lookupKeyword(name: string): TokenKind | undefined {
+export function lookupKeyword(name: string): number | undefined {
   return KEYWORDS.get(name);
 }

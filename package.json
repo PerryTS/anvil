@@ -1,5 +1,5 @@
 {
-  "name": "perrysdad",
+  "name": "anvil",
   "version": "0.1.0",
   "description": "Perry compiler in TypeScript with LLVM backend",
   "main": "dist/main.js",

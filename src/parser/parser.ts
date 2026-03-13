@@ -34,10 +34,13 @@ export class Parser {
   }
 
   parse(): SourceFile {
+    console.log("[parse] start, current.kind=" + this.current.kind + " EOF=" + TokenKind.EOF);
     const stmts: Array<AstStmt> = [];
     while (this.current.kind !== TokenKind.EOF) {
+      console.log("[parse] parseStatement, current.kind=" + this.current.kind + " value=" + this.current.value);
       stmts.push(this.parseStatement());
     }
+    console.log("[parse] done, " + stmts.length + " stmts");
     return { statements: stmts, fileName: this.fileName };
   }
 
@@ -49,14 +52,14 @@ export class Parser {
     return prev;
   }
 
-  private expect(kind: TokenKind): Token {
+  private expect(kind: number): Token {
     if (this.current.kind !== kind) {
       throw this.error("Expected " + tokenKindName(kind) + " but got " + tokenKindName(this.current.kind) + " '" + this.current.value + "'");
     }
     return this.advance();
   }
 
-  private eat(kind: TokenKind): boolean {
+  private eat(kind: number): boolean {
     if (this.current.kind === kind) {
       this.advance();
       return true;
@@ -64,7 +67,7 @@ export class Parser {
     return false;
   }
 
-  private at(kind: TokenKind): boolean {
+  private at(kind: number): boolean {
     return this.current.kind === kind;
   }
 
@@ -493,7 +496,7 @@ export class Parser {
       const body = this.parseBlockBody();
       return {
         name: name, kind: "getter", isStatic: isStatic, accessibility: accessibility,
-        readonly: isReadonly, params: [], returnType: returnType, typeAnnotation: null,
+        isReadonly: isReadonly, params: [], returnType: returnType, typeAnnotation: null,
         body: body, initializer: null,
       };
     }
@@ -506,7 +509,7 @@ export class Parser {
       const body = this.parseBlockBody();
       return {
         name: name, kind: "setter", isStatic: isStatic, accessibility: accessibility,
-        readonly: isReadonly, params: params, returnType: null, typeAnnotation: null,
+        isReadonly: isReadonly, params: params, returnType: null, typeAnnotation: null,
         body: body, initializer: null,
       };
     }
@@ -520,7 +523,7 @@ export class Parser {
       const body = this.parseBlockBody();
       return {
         name: "constructor", kind: "constructor", isStatic: false, accessibility: null,
-        readonly: false, params: params, returnType: null, typeAnnotation: null,
+        isReadonly: false, params: params, returnType: null, typeAnnotation: null,
         body: body, initializer: null,
       };
     }
@@ -560,7 +563,7 @@ export class Parser {
       }
       return {
         name: name, kind: "method", isStatic: isStatic, accessibility: accessibility,
-        readonly: isReadonly, params: params, returnType: returnType, typeAnnotation: null,
+        isReadonly: isReadonly, params: params, returnType: returnType, typeAnnotation: null,
         body: body, initializer: null,
       };
     }
@@ -577,7 +580,7 @@ export class Parser {
     this.eat(TokenKind.Semicolon);
     return {
       name: name, kind: "property", isStatic: isStatic, accessibility: accessibility,
-      readonly: isReadonly, params: null, returnType: null, typeAnnotation: typeAnnotation,
+      isReadonly: isReadonly, params: null, returnType: null, typeAnnotation: typeAnnotation,
       body: null, initializer: initializer,
     };
   }
@@ -829,12 +832,12 @@ export class Parser {
     }
 
     this.expect(TokenKind.Equal);
-    const type = this.parseTypeAnnotation();
+    const aliasType = this.parseTypeAnnotation();
     this.eat(TokenKind.Semicolon);
 
     return {
       kind: AstStmtKind.TypeAliasDecl, line: tok.line, col: tok.col,
-      name: name, typeParams: typeParams, type: type,
+      name: name, typeParams: typeParams, type: aliasType,
     };
   }
 
@@ -867,13 +870,11 @@ export class Parser {
     // Function type: (params) => ReturnType
     if (this.at(TokenKind.LeftParen)) {
       // Could be function type or parenthesized type
-      // Try to detect function type by looking for => after )
-      const saved = this.saveState();
-      try {
+      // Use lookahead to detect function type by checking for => after matching )
+      if (this.looksLikeArrowParams()) {
         ty = this.parseFunctionType();
         return this.parseTypePostfix(ty);
-      } catch (_e) {
-        this.restoreState(saved);
+      } else {
         // Parenthesized type
         this.expect(TokenKind.LeftParen);
         ty = this.parseTypeAnnotation();
@@ -886,7 +887,7 @@ export class Parser {
     if (this.at(TokenKind.Typeof)) {
       this.advance();
       const name = this.expect(TokenKind.Identifier).value;
-      ty = { kind: TypeNodeKind.TypeOf, name: name } as TypeNode & { name: string };
+      ty = { kind: TypeNodeKind.TypeOf, name: name } as any;
       return this.parseTypePostfix(ty);
     }
 
@@ -900,12 +901,17 @@ export class Parser {
     if (this.at(TokenKind.Identifier) || this.at(TokenKind.Null) || this.at(TokenKind.Undefined)) {
       const name = this.advance().value;
 
+      // Handle dotted type names (e.g., ExprKind.Number, StmtKind.Expr)
+      let fullName = name;
+      while (this.eat(TokenKind.Dot)) {
+        fullName = fullName + "." + this.advance().value;
+      }
       // Generic type: Name<T, U>
       if (this.at(TokenKind.LessThan)) {
         const typeArgs = this.parseTypeArguments();
-        ty = { kind: TypeNodeKind.Generic, name: name, typeArgs: typeArgs } as GenericTypeNode;
+        ty = { kind: TypeNodeKind.Generic, name: fullName, typeArgs: typeArgs } as GenericTypeNode;
       } else {
-        ty = { kind: TypeNodeKind.Named, name: name } as NamedTypeNode;
+        ty = { kind: TypeNodeKind.Named, name: fullName } as NamedTypeNode;
       }
     } else if (this.at(TokenKind.LeftBrace)) {
       // Object type literal - parse minimally
@@ -922,7 +928,7 @@ export class Parser {
       ty = { kind: TypeNodeKind.Tuple } as TypeNode;
     } else if (this.at(TokenKind.StringLiteral)) {
       const val = this.advance().value;
-      ty = { kind: TypeNodeKind.Literal, value: val } as TypeNode & { value: string };
+      ty = { kind: TypeNodeKind.Literal, value: val } as any;
     } else if (this.at(TokenKind.NumberLiteral)) {
       this.advance();
       ty = { kind: TypeNodeKind.Named, name: "number" } as NamedTypeNode;
@@ -979,11 +985,17 @@ export class Parser {
   private parseTypeArguments(): Array<TypeNode> {
     this.expect(TokenKind.LessThan);
     const args: Array<TypeNode> = [];
-    while (!this.at(TokenKind.GreaterThan) && !this.at(TokenKind.EOF)) {
+    while (!this.at(TokenKind.GreaterThan) && !this.at(TokenKind.GreaterGreater) && !this.at(TokenKind.EOF)) {
       args.push(this.parseTypeAnnotation());
       if (!this.eat(TokenKind.Comma)) break;
     }
-    this.expect(TokenKind.GreaterThan);
+    // Handle >> as two > tokens for nested generics like Map<string, Map<K, V>>
+    if (this.at(TokenKind.GreaterGreater)) {
+      // Consume >> but leave a > token by replacing current token
+      this.current = { kind: TokenKind.GreaterThan, value: ">", line: this.current.line, col: this.current.col + 1 };
+    } else {
+      this.expect(TokenKind.GreaterThan);
+    }
     return args;
   }
 
@@ -1205,7 +1217,7 @@ export class Parser {
     if (this.at(TokenKind.Void)) {
       const tok = this.advance();
       const operand = this.parseUnary();
-      return { kind: AstExprKind.Void, line: tok.line, col: tok.col, operand: operand } as AstExpr & { operand: AstExpr };
+      return { kind: AstExprKind.Void, line: tok.line, col: tok.col, operand: operand } as any;
     }
     if (this.at(TokenKind.PlusPlus) || this.at(TokenKind.MinusMinus)) {
       const tok = this.advance();
@@ -1302,9 +1314,8 @@ export class Parser {
         expr = { kind: AstExprKind.Call, line: expr.line, col: expr.col, callee: expr, args: args, typeArgs: null } as CallExprAst;
       } else if (this.at(TokenKind.LessThan)) {
         // Could be type arguments for a generic call: fn<T>(...)
-        // Try to parse as type args; if it fails, it's a comparison
-        const saved = this.saveState();
-        try {
+        // Use lookahead: scan to matching > and check if ( follows
+        if (this.looksLikeTypeArgs()) {
           const typeArgs = this.parseTypeArguments();
           if (this.at(TokenKind.LeftParen)) {
             this.advance();
@@ -1316,12 +1327,9 @@ export class Parser {
             this.expect(TokenKind.RightParen);
             expr = { kind: AstExprKind.Call, line: expr.line, col: expr.col, callee: expr, args: args, typeArgs: typeArgs } as CallExprAst;
           } else {
-            // Not a generic call, restore
-            this.restoreState(saved);
             break;
           }
-        } catch (_e) {
-          this.restoreState(saved);
+        } else {
           break;
         }
       } else {
@@ -1338,12 +1346,14 @@ export class Parser {
     if (tok.kind === TokenKind.NumberLiteral) {
       this.advance();
       let raw = tok.value;
-      // Remove underscores and bigint suffix
-      raw = raw.split("_").join("");
+      // Remove underscores and bigint suffix (avoid method chaining - Perry bug)
+      let rawParts: Array<string> = raw.split("_");
+      raw = rawParts.join("");
       if (raw.charAt(raw.length - 1) === "n") {
         raw = raw.substring(0, raw.length - 1);
       }
-      return { kind: AstExprKind.Number, line: tok.line, col: tok.col, value: Number(raw), raw: tok.value } as NumberLitExpr;
+      const numVal = Number(raw);
+      return { kind: AstExprKind.Number, line: tok.line, col: tok.col, value: numVal, raw: tok.value } as NumberLitExpr;
     }
 
     if (tok.kind === TokenKind.StringLiteral || tok.kind === TokenKind.TemplateLiteral) {
@@ -1420,9 +1430,10 @@ export class Parser {
 
   private parseParenOrArrow(): AstExpr {
     const tok = this.current;
-    // Try to parse as arrow function params
-    const saved = this.saveState();
-    try {
+    // Heuristic: check if this looks like arrow function params
+    // Arrow: () =>, (id) =>, (id: type) =>, (id, ...) =>
+    // Use saveState to look ahead and find matching ), then check for =>
+    if (this.looksLikeArrowParams()) {
       this.expect(TokenKind.LeftParen);
       const params = this.parseParamList();
       this.expect(TokenKind.RightParen);
@@ -1442,11 +1453,6 @@ export class Parser {
         const bodyExpr = this.parseAssignmentExpr();
         return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: bodyExpr } as ArrowExprAst;
       }
-
-      // Not an arrow, restore and parse as parenthesized expression
-      this.restoreState(saved);
-    } catch (_e) {
-      this.restoreState(saved);
     }
 
     // Parenthesized expression
@@ -1550,26 +1556,96 @@ export class Parser {
     return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: body };
   }
 
+  // Check if current < starts type arguments by scanning ahead to find matching >
+  // followed by (. Returns false if it's a comparison operator.
+  private looksLikeTypeArgs(): boolean {
+    const saved = this.saveState();
+    // Skip <
+    this.advance();
+    let depth = 1;
+    while (depth > 0 && !this.at(TokenKind.EOF)) {
+      if (this.at(TokenKind.LessThan)) {
+        depth = depth + 1;
+      } else if (this.at(TokenKind.GreaterThan)) {
+        depth = depth - 1;
+        if (depth === 0) break;
+      } else if (this.at(TokenKind.Semicolon) || this.at(TokenKind.LeftBrace) ||
+                 this.at(TokenKind.RightBrace) || this.at(TokenKind.RightParen)) {
+        // Hit a token that can't appear in type args - it's a comparison
+        this.restoreState(saved);
+        return false;
+      }
+      this.advance();
+    }
+    if (depth !== 0) {
+      this.restoreState(saved);
+      return false;
+    }
+    // Skip the >
+    this.advance();
+    // Type args should be followed by (
+    const result = this.at(TokenKind.LeftParen);
+    this.restoreState(saved);
+    return result;
+  }
+
+  // Check if current ( starts arrow function params by scanning ahead
+  private looksLikeArrowParams(): boolean {
+    const saved = this.saveState();
+    // Skip past (
+    this.advance();
+    let depth = 1;
+    while (depth > 0 && !this.at(TokenKind.EOF)) {
+      if (this.at(TokenKind.LeftParen)) {
+        depth = depth + 1;
+      } else if (this.at(TokenKind.RightParen)) {
+        depth = depth - 1;
+      }
+      this.advance();
+    }
+    // Now check if we see : (return type) or => (arrow)
+    let isArrow = false;
+    if (this.at(TokenKind.Arrow)) {
+      isArrow = true;
+    } else if (this.at(TokenKind.Colon)) {
+      // Could be return type annotation: (...): Type =>
+      // Scan past the type to check for =>
+      this.advance();
+      // Skip type tokens until we hit => or something clearly not a type
+      let typeDepth = 0;
+      while (!this.at(TokenKind.EOF)) {
+        if (this.at(TokenKind.LessThan)) { typeDepth = typeDepth + 1; this.advance(); }
+        else if (this.at(TokenKind.GreaterThan)) { typeDepth = typeDepth - 1; this.advance(); }
+        else if (this.at(TokenKind.Arrow)) { isArrow = true; break; }
+        else if (typeDepth === 0 && this.at(TokenKind.LeftBrace)) { break; }
+        else if (typeDepth === 0 && this.at(TokenKind.Semicolon)) { break; }
+        else { this.advance(); }
+      }
+    }
+    this.restoreState(saved);
+    return isArrow;
+  }
+
   // --- Save/restore for backtracking ---
 
   private saveState(): [number, number, number, Token] {
     return [
-      (this.scanner as any).pos,
-      (this.scanner as any).line,
-      (this.scanner as any).col,
+      this.scanner.getPos(),
+      this.scanner.getLine(),
+      this.scanner.getCol(),
       this.current,
     ];
   }
 
   private restoreState(state: [number, number, number, Token]): void {
-    (this.scanner as any).pos = state[0];
-    (this.scanner as any).line = state[1];
-    (this.scanner as any).col = state[2];
-    this.current = state[3];
+    this.scanner.setPos(state[0] as number);
+    this.scanner.setLine(state[1] as number);
+    this.scanner.setCol(state[2] as number);
+    this.current = state[3] as Token;
   }
 }
 
-function tokenKindName(kind: TokenKind): string {
+function tokenKindName(kind: number): string {
   if (kind === TokenKind.EOF) return "EOF";
   if (kind === TokenKind.NumberLiteral) return "number";
   if (kind === TokenKind.StringLiteral) return "string";

@@ -22,6 +22,13 @@ export class Scanner {
     this.tokenCol = 1;
   }
 
+  getPos(): number { return this.pos; }
+  setPos(v: number): void { this.pos = v; }
+  getLine(): number { return this.line; }
+  setLine(v: number): void { this.line = v; }
+  getCol(): number { return this.col; }
+  setCol(v: number): void { this.col = v; }
+
   scan(): Token {
     this.skipWhitespaceAndComments();
 
@@ -94,7 +101,7 @@ export class Scanner {
     return this.source.charCodeAt(idx);
   }
 
-  private makeToken(kind: TokenKind, value: string): Token {
+  private makeToken(kind: number, value: string): Token {
     return { kind: kind, value: value, line: this.tokenLine, col: this.tokenCol };
   }
 
@@ -144,7 +151,7 @@ export class Scanner {
     if (this.current() === 48 && (this.lookAhead(1) === 120 || this.lookAhead(1) === 88)) {
       this.advance(); // 0
       this.advance(); // x
-      while (this.pos < this.source.length && isHexDigit(this.current())) {
+      while (this.pos < this.source.length && (isHexDigit(this.current()) || this.current() === 95)) {
         this.advance();
       }
       // Check for bigint suffix 'n'

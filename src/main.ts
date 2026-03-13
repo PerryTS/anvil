@@ -1,4 +1,4 @@
-// perrysdad: Perry compiler in TypeScript with LLVM backend
+// anvil: TypeScript-to-native compiler with LLVM backend
 // CLI entry point
 
 import * as path from "path";
@@ -10,11 +10,13 @@ import {
   BinaryExpr, BinaryOp, CompareExpr, CompareOp,
   LocalGetExpr, LocalSetExpr,
 } from "./hir/ir";
-import {
-  Type, TypeKind, NUMBER_TYPE, STRING_TYPE, BOOLEAN_TYPE,
-  VOID_TYPE, ANY_TYPE, makeFunctionType,
-} from "./hir/types";
-import { compile, compileFromHIR, CompileOptions } from "./driver/compile";
+import { Type, TypeKind, makeFunctionType } from "./hir/types";
+const NUMBER_TYPE: Type = { kind: TypeKind.Number };
+const STRING_TYPE: Type = { kind: TypeKind.String };
+const BOOLEAN_TYPE: Type = { kind: TypeKind.Boolean };
+const VOID_TYPE: Type = { kind: TypeKind.Void };
+const ANY_TYPE: Type = { kind: TypeKind.Any };
+import { compile, compileFromHIR, compileMultiFile, CompileOptions } from "./driver/compile";
 
 function main(): void {
   const args = process.argv.slice(2);
@@ -47,11 +49,19 @@ function main(): void {
     }
   }
 
-  // Default runtime path: look in perry project
+  // Default runtime path: look in perry project (try multiple locations)
   if (runtimePath === "") {
-    runtimePath = path.resolve(__dirname, "../../perry/target/release/libperry_runtime.a");
-    if (!fs.existsSync(runtimePath)) {
-      runtimePath = path.resolve(__dirname, "../../perry/target/debug/libperry_runtime.a");
+    const candidates: Array<string> = [
+      path.resolve(__dirname, "../../perry/target/release/libperry_runtime.a"),
+      path.resolve(process.cwd(), "../perry/target/release/libperry_runtime.a"),
+      "/Users/amlug/projects/perry/target/release/libperry_runtime.a",
+    ];
+    runtimePath = candidates[0];
+    for (let j = 0; j < candidates.length; j = j + 1) {
+      if (fs.existsSync(candidates[j])) {
+        runtimePath = candidates[j];
+        break;
+      }
     }
   }
 
@@ -69,9 +79,9 @@ function main(): void {
   };
 
   if (inputFile !== "") {
-    // Compile a real .ts file
+    // Compile a real .ts file (multi-file if imports are found)
     options.inputFile = inputFile;
-    compile(options);
+    compileMultiFile(options);
   } else if (testMode === "hello") {
     // Phase 0: console.log(42)
     compileFromHIR(buildHelloWorld(), options);
@@ -88,7 +98,7 @@ function main(): void {
     // Phase 1 test: control flow
     compileFromHIR(buildControlFlowTest(), options);
   } else {
-    console.log("perrysdad - Perry compiler in TypeScript");
+    console.log("anvil - TypeScript-to-native compiler");
     console.log("");
     console.log("Usage: npx ts-node src/main.ts [options]");
     console.log("  --test hello        Phase 0: console.log(42)");
@@ -127,6 +137,7 @@ function buildHelloWorld(): HirModule {
     name: "hello",
     functions: [],
     init: [logCall],
+    globals: [], externalFuncs: [], importedGlobals: [],
   };
 }
 
@@ -225,7 +236,7 @@ function buildArithmeticTest(): HirModule {
     } as CallExpr,
   } as ExprStmt);
 
-  return { name: "arithmetic", functions: [], init: stmts };
+  return { name: "arithmetic", functions: [], init: stmts, globals: [], externalFuncs: [], importedGlobals: [] };
 }
 
 function buildStringTest(): HirModule {
@@ -282,7 +293,7 @@ function buildStringTest(): HirModule {
     } as CallExpr,
   } as ExprStmt);
 
-  return { name: "strings", functions: [], init: stmts };
+  return { name: "strings", functions: [], init: stmts, globals: [], externalFuncs: [], importedGlobals: [] };
 }
 
 function buildFunctionTest(): HirModule {
@@ -388,6 +399,7 @@ function buildFunctionTest(): HirModule {
     name: "functions",
     functions: [addFunc, doubleFunc],
     init: stmts,
+    globals: [], externalFuncs: [], importedGlobals: [],
   };
 }
 
@@ -461,7 +473,7 @@ function buildControlFlowTest(): HirModule {
         } as LocalSetExpr,
       } as ExprStmt,
     ],
-  } as unknown as Stmt);
+  } as Stmt);
 
   stmts.push(makeLogLocal(0));
 
@@ -502,7 +514,7 @@ function buildControlFlowTest(): HirModule {
         } as LocalSetExpr,
       } as ExprStmt,
     ],
-  } as unknown as Stmt);
+  } as Stmt);
 
   stmts.push(makeLogLocal(2));
 
@@ -520,7 +532,7 @@ function buildControlFlowTest(): HirModule {
     elseBody: [makeLogNumber(0)],
   } as IfStmt);
 
-  return { name: "control", functions: [], init: stmts };
+  return { name: "control", functions: [], init: stmts, globals: [], externalFuncs: [], importedGlobals: [] };
 }
 
 // Helper: make console.log(localId) stmt

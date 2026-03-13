@@ -365,7 +365,7 @@ export interface ClassMemberAst {
   kind: string;  // "method" | "property" | "constructor" | "getter" | "setter"
   isStatic: boolean;
   accessibility: string | null;  // "public" | "private" | "protected" | null
-  readonly: boolean;
+  isReadonly: boolean;
   params: Array<ParamDecl> | null;  // for methods
   returnType: TypeNode | null;
   typeAnnotation: TypeNode | null;  // for properties

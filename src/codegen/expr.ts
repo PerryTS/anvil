@@ -7,61 +7,69 @@ import {
   LocalGetExpr, LocalSetExpr, CallExpr, FuncRefExpr, IfExpr,
   ArrayExpr, ArrayGetExpr, ArraySetExpr,
   ObjectLitExpr, FieldGetExpr, FieldSetExpr,
-  MethodCallExpr, Int32Expr,
+  MethodCallExpr, Int32Expr, ClosureExpr, CaptureGetExpr,
+  GlobalGetExpr, GlobalSetExpr,
 } from "../hir/ir";
-import { TypeKind, isDynamic, isNumber, isString, isBoolean, Type } from "../hir/types";
+import { TypeKind, isDynamic, isNumber, isString, isBoolean, Type, FunctionType } from "../hir/types";
 import { LLBlock } from "../llvm/block";
-import { DOUBLE, I64, I32, I1, PTR } from "../llvm/types";
-import {
-  TAG_UNDEFINED, TAG_NULL, TAG_FALSE, TAG_TRUE, STRING_TAG, POINTER_TAG,
-  i64Literal, doubleLiteral,
-} from "./nanbox";
+const DOUBLE: string = "double";
+const I64: string = "i64";
+const I32: string = "i32";
+const I1: string = "i1";
+const PTR: string = "ptr";
+import { i64Literal, doubleLiteral, TAG_UNDEFINED_I64, TAG_NULL_I64, TAG_FALSE_I64, TAG_TRUE_I64, POINTER_TAG, POINTER_MASK, STRING_TAG, POINTER_TAG_I64, POINTER_MASK_I64, STRING_TAG_I64, INT32_TAG_I64 } from "./nanbox";
+const TAG_UNDEFINED = 0x7FFC_0000_0000_0001n;
+const TAG_NULL = 0x7FFC_0000_0000_0002n;
+const TAG_FALSE = 0x7FFC_0000_0000_0003n;
+const TAG_TRUE = 0x7FFC_0000_0000_0004n;
 import { CompilerContext } from "./compiler";
 
 // Compile an expression, returning an LLVM value string (register or constant)
 export function compileExpr(ctx: CompilerContext, block: LLBlock, expr: Expr): [LLBlock, string] {
   if (expr.kind === ExprKind.Number) {
-    const e = expr as NumberExpr;
+    const e: NumberExpr = expr as NumberExpr;
     return [block, doubleLiteral(e.value)];
   }
 
   if (expr.kind === ExprKind.Int32) {
-    const e = expr as Int32Expr;
-    // NaN-box the i32: bitcast (INT32_TAG | value) to double
-    const tagVal = 0x7FFE_0000_0000_0000n | BigInt(e.value);
-    const i64Val = block.bitcastI64ToDouble(i64Literal(tagVal));
+    const e: Int32Expr = expr as Int32Expr;
+    // NaN-box the i32: OR INT32_TAG with value, then bitcast to double
+    const tag = INT32_TAG_I64;
+    const valI64 = block.zext(I32, "" + e.value, I64);
+    const combined = block.or(I64, tag, valI64);
+    const i64Val = block.bitcastI64ToDouble(combined);
     return [block, i64Val];
   }
 
   if (expr.kind === ExprKind.String) {
-    const e = expr as StringExpr;
+    const e: StringExpr = expr as StringExpr;
     const strInfo = ctx.addStringConstant(e.value);
     const strName = strInfo[0];
     const strLen = strInfo[1];
     const strPtr = block.gep("i8", "@" + strName, [[I32, "0"]]);
-    const strHandle = block.call(I64, "js_string_from_bytes", [[PTR, strPtr], [I64, strLen.toString()]]);
+    const strHandle = block.call(I64, "js_string_from_bytes", [[PTR, strPtr], [I32, strLen.toString()]]);
     const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, strHandle]]);
     return [block, boxed];
   }
 
   if (expr.kind === ExprKind.Bool) {
-    const e = expr as BoolExpr;
+    const e: BoolExpr = expr as BoolExpr;
     if (e.value) {
-      const val = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
+      const val = block.bitcastI64ToDouble(TAG_TRUE_I64);
       return [block, val];
     } else {
-      const val = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+      const val = block.bitcastI64ToDouble(TAG_FALSE_I64);
       return [block, val];
     }
   }
 
   if (expr.kind === ExprKind.Undefined) {
-    const val = block.bitcastI64ToDouble(i64Literal(TAG_UNDEFINED));
+    const val = block.bitcastI64ToDouble(TAG_UNDEFINED_I64);
     return [block, val];
   }
 
   if (expr.kind === ExprKind.Null) {
-    const val = block.bitcastI64ToDouble(i64Literal(TAG_NULL));
+    const val = block.bitcastI64ToDouble(TAG_NULL_I64);
     return [block, val];
   }
 
@@ -82,14 +90,14 @@ export function compileExpr(ctx: CompilerContext, block: LLBlock, expr: Expr): [
   }
 
   if (expr.kind === ExprKind.LocalGet) {
-    const e = expr as LocalGetExpr;
+    const e: LocalGetExpr = expr as LocalGetExpr;
     const ptr = ctx.getLocal(e.localId);
     const val = block.load(DOUBLE, ptr);
     return [block, val];
   }
 
   if (expr.kind === ExprKind.LocalSet) {
-    const e = expr as LocalSetExpr;
+    const e: LocalSetExpr = expr as LocalSetExpr;
     const result = compileExpr(ctx, block, e.value);
     block = result[0];
     const val = result[1];
@@ -98,12 +106,29 @@ export function compileExpr(ctx: CompilerContext, block: LLBlock, expr: Expr): [
     return [block, val];
   }
 
+  if (expr.kind === ExprKind.GlobalGet) {
+    const e: GlobalGetExpr = expr as GlobalGetExpr;
+    const globalName = ctx.getGlobalName(e.name);
+    const val = block.load(DOUBLE, globalName);
+    return [block, val];
+  }
+
+  if (expr.kind === ExprKind.GlobalSet) {
+    const e: GlobalSetExpr = expr as GlobalSetExpr;
+    const result = compileExpr(ctx, block, e.value);
+    block = result[0];
+    const val = result[1];
+    const globalName = ctx.getGlobalName(e.name);
+    block.store(DOUBLE, val, globalName);
+    return [block, val];
+  }
+
   if (expr.kind === ExprKind.Call) {
     return compileCall(ctx, block, expr as CallExpr);
   }
 
   if (expr.kind === ExprKind.FuncRef) {
-    const e = expr as FuncRefExpr;
+    const e: FuncRefExpr = expr as FuncRefExpr;
     return [block, "@" + ctx.getFuncName(e.funcId)];
   }
 
@@ -137,6 +162,14 @@ export function compileExpr(ctx: CompilerContext, block: LLBlock, expr: Expr): [
 
   if (expr.kind === ExprKind.MethodCall) {
     return compileMethodCall(ctx, block, expr as MethodCallExpr);
+  }
+
+  if (expr.kind === ExprKind.Closure) {
+    return compileClosure(ctx, block, expr as ClosureExpr);
+  }
+
+  if (expr.kind === ExprKind.CaptureGet) {
+    return compileCaptureGet(ctx, block, expr as CaptureGetExpr);
   }
 
   throw new Error("Unsupported expr kind: " + expr.kind);
@@ -311,12 +344,12 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
     // Update the local if the object is a LocalGet (push may reallocate)
     const newBoxed = boxPointer(block, newPtr);
     if (expr.object.kind === ExprKind.LocalGet) {
-      const localId = (expr.object as LocalGetExpr).localId;
-      const localPtr = ctx.getLocal(localId);
+      const objLocalGet: LocalGetExpr = expr.object as LocalGetExpr;
+      const localPtr = ctx.getLocal(objLocalGet.localId);
       block.store(DOUBLE, newBoxed, localPtr);
     }
     // push returns the new length, but we approximate with undefined for now
-    const undef = block.bitcastI64ToDouble(i64Literal(TAG_UNDEFINED));
+    const undef = block.bitcastI64ToDouble(TAG_UNDEFINED_I64);
     return [block, undef];
   }
 
@@ -351,8 +384,8 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
     const arrPtr = unboxPointer(block, objVal);
     const result = block.call(I32, "js_array_includes_f64", [[PTR, arrPtr], [DOUBLE, argVals[0]]]);
     const isTrue = block.icmpNe(I32, result, "0");
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
   }
 
@@ -392,8 +425,8 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
     // Update the local if the object is a LocalGet (set may reallocate)
     const newBoxed = boxPointer(block, newPtr);
     if (expr.object.kind === ExprKind.LocalGet) {
-      const localId = (expr.object as LocalGetExpr).localId;
-      const localPtr = ctx.getLocal(localId);
+      const objLocalGet2: LocalGetExpr = expr.object as LocalGetExpr;
+      const localPtr = ctx.getLocal(objLocalGet2.localId);
       block.store(DOUBLE, newBoxed, localPtr);
     }
     // Return the map itself (for chaining)
@@ -410,8 +443,8 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
     const mapPtr = unboxPointer(block, objVal);
     const result = block.call(I32, "js_map_has", [[PTR, mapPtr], [DOUBLE, argVals[0]]]);
     const isTrue = block.icmpNe(I32, result, "0");
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
   }
 
@@ -419,8 +452,8 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
     const mapPtr = unboxPointer(block, objVal);
     const result = block.call(I32, "js_map_delete", [[PTR, mapPtr], [DOUBLE, argVals[0]]]);
     const isTrue = block.icmpNe(I32, result, "0");
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
   }
 
@@ -431,7 +464,191 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
     return [block, sizeF64];
   }
 
+  // --- String methods ---
+  // String values are NaN-boxed: bitcast double->i64, AND with POINTER_MASK to get raw string handle
+  if (method === "str_length") {
+    const strHandle = unboxString(block, objVal);
+    const len = block.call(I32, "js_string_length", [[I64, strHandle]]);
+    const lenF64 = block.sitofp(I32, len, DOUBLE);
+    return [block, lenF64];
+  }
+
+  if (method === "str_indexOf") {
+    const strHandle = unboxString(block, objVal);
+    const searchHandle = unboxString(block, argVals[0]);
+    const idx = block.call(I32, "js_string_index_of", [[I64, strHandle], [I64, searchHandle]]);
+    const idxF64 = block.sitofp(I32, idx, DOUBLE);
+    return [block, idxF64];
+  }
+
+  if (method === "str_includes") {
+    const strHandle = unboxString(block, objVal);
+    const searchHandle = unboxString(block, argVals[0]);
+    // No js_string_includes in runtime; use index_of >= 0
+    const idx = block.call(I32, "js_string_index_of", [[I64, strHandle], [I64, searchHandle]]);
+    const isTrue = block.icmpSge(I32, idx, "0");
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
+    return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
+  }
+
+  if (method === "str_startsWith") {
+    const strHandle = unboxString(block, objVal);
+    const searchHandle = unboxString(block, argVals[0]);
+    const result = block.call(I32, "js_string_starts_with", [[I64, strHandle], [I64, searchHandle]]);
+    const isTrue = block.icmpNe(I32, result, "0");
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
+    return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
+  }
+
+  if (method === "str_endsWith") {
+    const strHandle = unboxString(block, objVal);
+    const searchHandle = unboxString(block, argVals[0]);
+    const result = block.call(I32, "js_string_ends_with", [[I64, strHandle], [I64, searchHandle]]);
+    const isTrue = block.icmpNe(I32, result, "0");
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
+    return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
+  }
+
+  if (method === "str_slice" || method === "str_substring") {
+    const strHandle = unboxString(block, objVal);
+    const start = block.fptosi(DOUBLE, argVals[0], I32);
+    let end: string;
+    if (argVals.length > 1) {
+      end = block.fptosi(DOUBLE, argVals[1], I32);
+    } else {
+      // Default end = string length
+      end = block.call(I32, "js_string_length", [[I64, strHandle]]);
+    }
+    const resultHandle = block.call(I64, "js_string_slice", [[I64, strHandle], [I32, start], [I32, end]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  if (method === "str_trim") {
+    const strHandle = unboxString(block, objVal);
+    const resultHandle = block.call(I64, "js_string_trim", [[I64, strHandle]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  if (method === "str_charAt") {
+    const strHandle = unboxString(block, objVal);
+    const idx = block.fptosi(DOUBLE, argVals[0], I32);
+    const resultHandle = block.call(I64, "js_string_char_at", [[I64, strHandle], [I32, idx]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  if (method === "str_charCodeAt") {
+    const strHandle = unboxString(block, objVal);
+    const idx = block.fptosi(DOUBLE, argVals[0], I32);
+    const codeF64 = block.call(DOUBLE, "js_string_char_code_at", [[I64, strHandle], [I32, idx]]);
+    return [block, codeF64];
+  }
+
+  if (method === "str_split") {
+    const strHandle = unboxString(block, objVal);
+    const sepHandle = unboxString(block, argVals[0]);
+    const resultHandle = block.call(I64, "js_string_split", [[I64, strHandle], [I64, sepHandle]]);
+    // js_string_split returns a raw pointer to ArrayHeader
+    const resultPtr = block.inttoptr(I64, resultHandle);
+    return [block, boxPointer(block, resultPtr)];
+  }
+
+  if (method === "join") {
+    // Array join: arr.join(separator) -> string
+    const arrPtr = unboxPointer(block, objVal);
+    let sepPtr: string;
+    if (argVals.length > 0) {
+      // Separator is a NaN-boxed string
+      const sepHandle = unboxString(block, argVals[0]);
+      sepPtr = block.inttoptr(I64, sepHandle);
+    } else {
+      // Default separator: ","
+      const sepInfo = ctx.addStringConstant(",");
+      const sepStrHandle = block.call(I64, "js_string_from_bytes",
+        [[PTR, "@" + sepInfo[0]], [I64, "" + sepInfo[1]]]);
+      sepPtr = block.inttoptr(I64, sepStrHandle);
+    }
+    const resultPtr = block.call(PTR, "js_array_join", [[PTR, arrPtr], [PTR, sepPtr]]);
+    const resultI64 = block.ptrtoint(resultPtr, I64);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultI64]]);
+    return [block, boxed];
+  }
+
+  if (method === "str_replace") {
+    const strHandle = unboxString(block, objVal);
+    const searchHandle = unboxString(block, argVals[0]);
+    const replaceHandle = unboxString(block, argVals[1]);
+    const resultHandle = block.call(I64, "js_string_replace_string", [[I64, strHandle], [I64, searchHandle], [I64, replaceHandle]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  if (method === "str_toUpperCase") {
+    const strHandle = unboxString(block, objVal);
+    const resultHandle = block.call(I64, "js_string_to_upper_case", [[I64, strHandle]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  if (method === "str_toLowerCase") {
+    const strHandle = unboxString(block, objVal);
+    const resultHandle = block.call(I64, "js_string_to_lower_case", [[I64, strHandle]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  if (method === "toString") {
+    // Convert any value to string via js_jsvalue_to_string
+    const strHandle = block.call(I64, "js_jsvalue_to_string", [[DOUBLE, objVal]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, strHandle]]);
+    return [block, boxed];
+  }
+
   throw new Error("Unsupported method call: " + method);
+}
+
+// --- Helper: extract raw string handle from a NaN-boxed string value ---
+function unboxString(block: LLBlock, val: string): string {
+  const i64Val = block.bitcastDoubleToI64(val);
+  return block.and(I64, i64Val, "281474976710655"); // POINTER_MASK = 0x0000_FFFF_FFFF_FFFF
+}
+
+// --- Closure ---
+
+function compileClosure(ctx: CompilerContext, block: LLBlock, expr: ClosureExpr): [LLBlock, string] {
+  const funcName = ctx.getFuncName(expr.funcId);
+  const captureCount = expr.captures.length;
+
+  // Allocate closure: js_closure_alloc(func_ptr, capture_count)
+  const closurePtr = block.call(PTR, "js_closure_alloc", [[PTR, "@" + funcName], [I32, captureCount.toString()]]);
+
+  // Set captures
+  for (let i = 0; i < captureCount; i = i + 1) {
+    const capResult = compileExpr(ctx, block, expr.captures[i]);
+    block = capResult[0];
+    const capVal = capResult[1];
+    block.callVoid("js_closure_set_capture_f64", [[PTR, closurePtr], [I32, i.toString()], [DOUBLE, capVal]]);
+  }
+
+  // NaN-box the closure pointer
+  const boxed = boxPointer(block, closurePtr);
+  return [block, boxed];
+}
+
+function compileCaptureGet(ctx: CompilerContext, block: LLBlock, expr: CaptureGetExpr): [LLBlock, string] {
+  // Load closure pointer from the first param (closurePtrLocalId)
+  const closurePtrSlot = ctx.getLocal(expr.closurePtrLocalId);
+  const closurePtrBoxed = block.load(DOUBLE, closurePtrSlot);
+  // The closure ptr param is passed as double (NaN-boxed pointer), but js_closure_get_capture_f64 needs raw ptr
+  const closurePtr = unboxPointer(block, closurePtrBoxed);
+  // Read the capture
+  const result = block.call(DOUBLE, "js_closure_get_capture_f64", [[PTR, closurePtr], [I32, expr.captureIndex.toString()]]);
+  return [block, result];
 }
 
 // --- Binary ---
@@ -467,14 +684,24 @@ function compileBinary(ctx: CompilerContext, block: LLBlock, expr: BinaryExpr): 
     }
   }
 
-  // For string concat when both are strings
-  if (isString(expr.left.ty) && isString(expr.right.ty) && expr.op === BinaryOp.Add) {
-    // Unbox both strings, concat, rebox
-    const leftI64 = block.bitcastDoubleToI64(left);
-    const leftPtr = block.and(I64, leftI64, "281474976710655"); // POINTER_MASK
-    const rightI64 = block.bitcastDoubleToI64(right);
-    const rightPtr = block.and(I64, rightI64, "281474976710655");
-    const resultPtr = block.call(I64, "js_string_concat", [[I64, leftPtr], [I64, rightPtr]]);
+  // For string concat when at least one operand is a string
+  if ((isString(expr.left.ty) || isString(expr.right.ty)) && expr.op === BinaryOp.Add) {
+    // Convert both to string handles, then concat
+    let leftHandle: string;
+    let rightHandle: string;
+    if (isString(expr.left.ty)) {
+      const li = block.bitcastDoubleToI64(left);
+      leftHandle = block.and(I64, li, "281474976710655"); // POINTER_MASK
+    } else {
+      leftHandle = block.call(I64, "js_jsvalue_to_string", [[DOUBLE, left]]);
+    }
+    if (isString(expr.right.ty)) {
+      const ri = block.bitcastDoubleToI64(right);
+      rightHandle = block.and(I64, ri, "281474976710655");
+    } else {
+      rightHandle = block.call(I64, "js_jsvalue_to_string", [[DOUBLE, right]]);
+    }
+    const resultPtr = block.call(I64, "js_string_concat", [[I64, leftHandle], [I64, rightHandle]]);
     const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultPtr]]);
     return [block, boxed];
   }
@@ -541,8 +768,8 @@ function compileUnary(ctx: CompilerContext, block: LLBlock, expr: UnaryExpr): [L
     // !x => is_truthy(x) ? false : true
     const truthy = block.call(I32, "js_is_truthy", [[DOUBLE, val]]);
     const isZero = block.icmpEq(I32, truthy, "0");
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     const selected = block.select(I1, isZero, DOUBLE, trueVal, falseVal);
     return [block, selected];
   }
@@ -589,8 +816,8 @@ function compileCompare(ctx: CompilerContext, block: LLBlock, expr: CompareExpr)
       cmpResult = block.fcmp("oge", left, right);
     }
     // Convert i1 to NaN-boxed boolean
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     const selected = block.select(I1, cmpResult, DOUBLE, trueVal, falseVal);
     return [block, selected];
   }
@@ -599,15 +826,15 @@ function compileCompare(ctx: CompilerContext, block: LLBlock, expr: CompareExpr)
   if (expr.op === CompareOp.Eq || expr.op === CompareOp.StrictEq) {
     const eqResult = block.call(I32, "js_jsvalue_equals", [[DOUBLE, left], [DOUBLE, right]]);
     const isTrue = block.icmpNe(I32, eqResult, "0");
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
   }
   if (expr.op === CompareOp.Ne || expr.op === CompareOp.StrictNe) {
     const eqResult = block.call(I32, "js_jsvalue_equals", [[DOUBLE, left], [DOUBLE, right]]);
     const isFalse = block.icmpEq(I32, eqResult, "0");
-    const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-    const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
     return [block, block.select(I1, isFalse, DOUBLE, trueVal, falseVal)];
   }
 
@@ -623,8 +850,8 @@ function compileCompare(ctx: CompilerContext, block: LLBlock, expr: CompareExpr)
   } else {
     cond = block.icmpSge(I32, cmpResult, "0");
   }
-  const trueVal = block.bitcastI64ToDouble(i64Literal(TAG_TRUE));
-  const falseVal = block.bitcastI64ToDouble(i64Literal(TAG_FALSE));
+  const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
+  const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
   return [block, block.select(I1, cond, DOUBLE, trueVal, falseVal)];
 }
 
@@ -637,8 +864,8 @@ function compileLogical(ctx: CompilerContext, block: LLBlock, expr: LogicalExpr)
   const truthy = block.call(I32, "js_is_truthy", [[DOUBLE, leftVal]]);
   const isTruthy = block.icmpNe(I32, truthy, "0");
 
-  const rightBlock = ctx.createBlock("logical.right");
-  const mergeBlock = ctx.createBlock("logical.merge");
+  const rightBlock: LLBlock = ctx.createBlock("logical.right");
+  const mergeBlock: LLBlock = ctx.createBlock("logical.merge");
 
   if (expr.op === LogicalOp.And) {
     block.condBr(isTruthy, rightBlock.label, mergeBlock.label);
@@ -647,8 +874,8 @@ function compileLogical(ctx: CompilerContext, block: LLBlock, expr: LogicalExpr)
   }
 
   const rightResult = compileExpr(ctx, rightBlock, expr.right);
-  const rightFinalBlock = rightResult[0];
-  const rightVal = rightResult[1];
+  const rightFinalBlock: LLBlock = rightResult[0] as LLBlock;
+  const rightVal: string = rightResult[1] as string;
   if (!rightFinalBlock.isTerminated()) {
     rightFinalBlock.br(mergeBlock.label);
   }
@@ -672,12 +899,28 @@ function compileCall(ctx: CompilerContext, block: LLBlock, expr: CallExpr): [LLB
 
   // If callee is a FuncRef, call the function directly
   if (expr.callee.kind === ExprKind.FuncRef) {
-    const funcRef = expr.callee as FuncRefExpr;
+    const funcRef: FuncRefExpr = expr.callee as FuncRefExpr;
 
     // Handle $map_alloc pseudo-function
     if (funcRef.name === "$map_alloc") {
       const mapPtr = block.call(PTR, "js_map_alloc", [[I32, "0"]]);
       return [block, boxPointer(block, mapPtr)];
+    }
+
+    // Handle $object_alloc_N pseudo-function (class constructor object allocation)
+    if (funcRef.name.startsWith("$object_alloc_")) {
+      const fieldCount = funcRef.name.substring(14);  // extract N from "$object_alloc_N"
+      const objPtr = block.call(PTR, "js_object_alloc", [[I32, "0"], [I32, fieldCount]]);
+      return [block, boxPointer(block, objPtr)];
+    }
+
+    // Handle String.fromCharCode(code) -> NaN-boxed string
+    if (funcRef.name === "js_string_from_char_code") {
+      const codeI32 = block.fptosi(DOUBLE, argVals[0][0], I32);
+      const strPtr = block.call(PTR, "js_string_from_char_code", [[I32, codeI32]]);
+      const strI64 = block.ptrtoint(strPtr, I64);
+      const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, strI64]]);
+      return [block, boxed];
     }
 
     const funcInfo = ctx.getFuncInfo(funcRef.funcId);
@@ -686,21 +929,44 @@ function compileCall(ctx: CompilerContext, block: LLBlock, expr: CallExpr): [LLB
     for (let i = 0; i < argVals.length; i = i + 1) {
       args.push([DOUBLE, argVals[i][0]]);
     }
+
+    // If this is an external/imported function (no HIR info), ensure it's declared
+    if (funcInfo === null) {
+      ctx.ensureExternalDeclared(funcName, argVals.length);
+    }
+
     const retType = funcRef.ty;
     const isVoidReturn = (funcInfo !== null && (funcInfo.returnType.kind === TypeKind.Void || funcInfo.returnType.kind === TypeKind.Undefined))
-      || (retType.kind === TypeKind.Function && ((retType as any).returnType.kind === TypeKind.Void || (retType as any).returnType.kind === TypeKind.Undefined))
+      || (retType.kind === TypeKind.Function && ((retType as FunctionType).returnType.kind === TypeKind.Void || (retType as FunctionType).returnType.kind === TypeKind.Undefined))
       || isVoidRuntimeFunction(funcName);
     if (isVoidReturn) {
       block.callVoid(funcName, args);
-      const undef = block.bitcastI64ToDouble(i64Literal(TAG_UNDEFINED));
+      const undef = block.bitcastI64ToDouble(TAG_UNDEFINED_I64);
       return [block, undef];
     }
     const result = block.call(DOUBLE, funcName, args);
     return [block, result];
   }
 
-  // Dynamic call - not yet supported
-  throw new Error("Dynamic function calls not yet supported");
+  // Dynamic call - callee is a closure stored in a variable
+  const calleeResult = compileExpr(ctx, block, expr.callee);
+  block = calleeResult[0];
+  const calleeVal = calleeResult[1];
+
+  // Unbox the closure pointer
+  const closurePtr = unboxPointer(block, calleeVal);
+
+  // Build args: closure_ptr, then user args
+  const closureArgs: Array<[string, string]> = [[PTR, closurePtr]];
+  for (let i = 0; i < argVals.length; i = i + 1) {
+    closureArgs.push([DOUBLE, argVals[i][0]]);
+  }
+
+  // Call js_closure_callN based on argument count
+  const argCount = argVals.length;
+  const closureCallName = "js_closure_call" + argCount;
+  const result = block.call(DOUBLE, closureCallName, closureArgs);
+  return [block, result];
 }
 
 function compileIfExpr(ctx: CompilerContext, block: LLBlock, expr: IfExpr): [LLBlock, string] {
@@ -711,7 +977,7 @@ function compileIfExpr(ctx: CompilerContext, block: LLBlock, expr: IfExpr): [LLB
   let cond: string;
   if (isBoolean(expr.condition.ty)) {
     const condI64 = block.bitcastDoubleToI64(condVal);
-    cond = block.icmpEq(I64, condI64, i64Literal(TAG_TRUE));
+    cond = block.icmpEq(I64, condI64, TAG_TRUE_I64);
   } else if (isNumber(expr.condition.ty)) {
     cond = block.fcmp("one", condVal, "0.0");
   } else {
@@ -719,22 +985,22 @@ function compileIfExpr(ctx: CompilerContext, block: LLBlock, expr: IfExpr): [LLB
     cond = block.icmpNe(I32, truthy, "0");
   }
 
-  const thenBlock = ctx.createBlock("if.then");
-  const elseBlock = ctx.createBlock("if.else");
-  const mergeBlock = ctx.createBlock("if.merge");
+  const thenBlock: LLBlock = ctx.createBlock("if.then");
+  const elseBlock: LLBlock = ctx.createBlock("if.else");
+  const mergeBlock: LLBlock = ctx.createBlock("if.merge");
 
   block.condBr(cond, thenBlock.label, elseBlock.label);
 
   const thenResult = compileExpr(ctx, thenBlock, expr.thenExpr);
-  const thenFinal = thenResult[0];
-  const thenVal = thenResult[1];
+  const thenFinal: LLBlock = thenResult[0] as LLBlock;
+  const thenVal: string = thenResult[1] as string;
   if (!thenFinal.isTerminated()) {
     thenFinal.br(mergeBlock.label);
   }
 
   const elseResult = compileExpr(ctx, elseBlock, expr.elseExpr);
-  const elseFinal = elseResult[0];
-  const elseVal = elseResult[1];
+  const elseFinal: LLBlock = elseResult[0] as LLBlock;
+  const elseVal: string = elseResult[1] as string;
   if (!elseFinal.isTerminated()) {
     elseFinal.br(mergeBlock.label);
   }

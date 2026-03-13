@@ -2,7 +2,12 @@
 // These match perry-runtime's #[no_mangle] extern "C" functions
 
 import { LLModule } from "../llvm/module";
-import { DOUBLE, I64, I32, I8, PTR, VOID } from "../llvm/types";
+const DOUBLE: string = "double";
+const I64: string = "i64";
+const I32: string = "i32";
+const I8: string = "i8";
+const PTR: string = "ptr";
+const VOID: string = "void";
 
 export function declareRuntimeFunctions(mod: LLModule): void {
   // --- GC ---
@@ -24,26 +29,27 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_nanbox_is_pointer", I32, [DOUBLE]);
 
   // --- String ---
-  mod.declareFunction("js_string_from_bytes", I64, [PTR, I64]);
+  mod.declareFunction("js_string_from_bytes", I64, [PTR, I32]);
   mod.declareFunction("js_string_concat", I64, [I64, I64]);
   mod.declareFunction("js_string_eq", I32, [I64, I64]);
-  mod.declareFunction("js_string_len", I64, [I64]);
+  mod.declareFunction("js_string_length", I32, [I64]);
   mod.declareFunction("js_jsvalue_to_string", I64, [DOUBLE]);
   mod.declareFunction("js_string_from_number", I64, [DOUBLE]);
   mod.declareFunction("js_string_from_bool", I64, [I32]);
   mod.declareFunction("js_number_to_string", I64, [DOUBLE]);
-  mod.declareFunction("js_string_includes", I32, [I64, I64]);
   mod.declareFunction("js_string_starts_with", I32, [I64, I64]);
   mod.declareFunction("js_string_ends_with", I32, [I64, I64]);
   mod.declareFunction("js_string_index_of", I32, [I64, I64]);
   mod.declareFunction("js_string_slice", I64, [I64, I32, I32]);
   mod.declareFunction("js_string_trim", I64, [I64]);
   mod.declareFunction("js_string_char_at", I64, [I64, I32]);
-  mod.declareFunction("js_string_char_code_at", I32, [I64, I32]);
+  mod.declareFunction("js_string_char_code_at", DOUBLE, [I64, I32]);
   mod.declareFunction("js_string_split", I64, [I64, I64]);
-  mod.declareFunction("js_string_replace", I64, [I64, I64, I64]);
+  mod.declareFunction("js_string_replace_string", I64, [I64, I64, I64]);
   mod.declareFunction("js_string_to_upper_case", I64, [I64]);
   mod.declareFunction("js_string_to_lower_case", I64, [I64]);
+  mod.declareFunction("js_string_substring", I64, [I64, I32, I32]);
+  mod.declareFunction("js_string_from_char_code", PTR, [I32]);
 
   // --- Dynamic arithmetic (JSValue = repr(transparent) u64 -> passed as i64) ---
   mod.declareFunction("js_add", I64, [I64, I64]);
@@ -61,6 +67,9 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   // --- Type checks ---
   mod.declareFunction("js_is_truthy", I32, [DOUBLE]);
   mod.declareFunction("js_typeof", I64, [DOUBLE]);
+  mod.declareFunction("js_number_coerce", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_parse_int", DOUBLE, [I64, DOUBLE]);
+  mod.declareFunction("js_array_is_array", DOUBLE, [DOUBLE]);
 
   // --- Object ---
   // js_object_alloc(class_id: u32, field_count: u32) -> *mut ObjectHeader
@@ -129,6 +138,8 @@ export function declareRuntimeFunctions(mod: LLModule): void {
 
   // --- Process ---
   mod.declareFunction("js_process_exit", VOID, [I32]);
+  mod.declareFunction("js_process_get_argv", DOUBLE, []);
+  mod.declareFunction("js_process_cwd", DOUBLE, []);
 
   // --- Math (only declare those that exist in the runtime) ---
   mod.declareFunction("js_math_pow", DOUBLE, [DOUBLE, DOUBLE]);

@@ -34,6 +34,8 @@ export const enum ExprKind {
   CaptureGet = 26,
   CaptureSet = 27,
   Int32 = 28,
+  GlobalGet = 29,
+  GlobalSet = 30,
 }
 
 export interface Expr {
@@ -228,6 +230,29 @@ export interface Int32Expr extends Expr {
   value: number;
 }
 
+export interface ClosureExpr extends Expr {
+  kind: ExprKind.Closure;
+  funcId: number;
+  captures: Array<Expr>;
+}
+
+export interface CaptureGetExpr extends Expr {
+  kind: ExprKind.CaptureGet;
+  captureIndex: number;
+  closurePtrLocalId: number;
+}
+
+export interface GlobalGetExpr extends Expr {
+  kind: ExprKind.GlobalGet;
+  name: string;
+}
+
+export interface GlobalSetExpr extends Expr {
+  kind: ExprKind.GlobalSet;
+  name: string;
+  value: Expr;
+}
+
 // --- Statements ---
 
 export const enum StmtKind {
@@ -316,4 +341,7 @@ export interface HirModule {
   name: string;
   functions: Array<HirFunction>;
   init: Array<Stmt>;
+  globals: Array<string>;  // names of module-level variables accessed from functions
+  externalFuncs: Array<[number, string]>;  // [funcId, name] for imported functions
+  importedGlobals: Array<[string, string]>;  // [localName, fullGlobalName] for imported variables
 }

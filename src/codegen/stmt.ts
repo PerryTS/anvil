@@ -7,15 +7,20 @@ import {
 } from "../hir/ir";
 import { TypeKind, isNumber, isBoolean } from "../hir/types";
 import { LLBlock } from "../llvm/block";
-import { DOUBLE, I64, I32, I1 } from "../llvm/types";
-import { TAG_UNDEFINED, TAG_TRUE, i64Literal, doubleLiteral } from "./nanbox";
+const DOUBLE: string = "double";
+const I64: string = "i64";
+const I32: string = "i32";
+const I1: string = "i1";
+import { i64Literal, doubleLiteral, TAG_UNDEFINED_I64, TAG_TRUE_I64 } from "./nanbox";
+const TAG_UNDEFINED = 0x7FFC_0000_0000_0001n;
+const TAG_TRUE = 0x7FFC_0000_0000_0004n;
 import { CompilerContext } from "./compiler";
 import { compileExpr } from "./expr";
 
 // Compile a statement, returns the current block (may change due to control flow)
 export function compileStmt(ctx: CompilerContext, block: LLBlock, stmt: Stmt): LLBlock {
   if (stmt.kind === StmtKind.Expr) {
-    const s = stmt as ExprStmt;
+    const s: ExprStmt = stmt as ExprStmt;
     const result = compileExpr(ctx, block, s.expr);
     return result[0];
   }
@@ -57,7 +62,7 @@ export function compileStmt(ctx: CompilerContext, block: LLBlock, stmt: Stmt): L
   }
 
   if (stmt.kind === StmtKind.Block) {
-    const s = stmt as BlockStmt;
+    const s: BlockStmt = stmt as BlockStmt;
     for (let i = 0; i < s.stmts.length; i = i + 1) {
       if (block.isTerminated()) {
         break;
@@ -81,7 +86,7 @@ function compileLet(ctx: CompilerContext, block: LLBlock, stmt: LetStmt): LLBloc
     block.store(DOUBLE, result[1], ptr);
   } else {
     // Initialize to undefined
-    const undef = block.bitcastI64ToDouble(i64Literal(TAG_UNDEFINED));
+    const undef = block.bitcastI64ToDouble(TAG_UNDEFINED_I64);
     block.store(DOUBLE, undef, ptr);
   }
 
@@ -94,7 +99,7 @@ function compileReturn(ctx: CompilerContext, block: LLBlock, stmt: ReturnStmt): 
     block = result[0];
     block.ret(DOUBLE, result[1]);
   } else {
-    const undef = block.bitcastI64ToDouble(i64Literal(TAG_UNDEFINED));
+    const undef = block.bitcastI64ToDouble(TAG_UNDEFINED_I64);
     block.ret(DOUBLE, undef);
   }
   return block;
@@ -107,7 +112,7 @@ function compileCondition(ctx: CompilerContext, block: LLBlock, condExpr: Expr):
 
   if (isBoolean(condExpr.ty)) {
     const condI64 = block.bitcastDoubleToI64(condVal);
-    const cond = block.icmpEq(I64, condI64, i64Literal(TAG_TRUE));
+    const cond = block.icmpEq(I64, condI64, TAG_TRUE_I64);
     return [block, cond];
   }
   if (isNumber(condExpr.ty)) {
@@ -125,15 +130,15 @@ function compileIf(ctx: CompilerContext, block: LLBlock, stmt: IfStmt): LLBlock 
   block = condResult[0];
   const cond = condResult[1];
 
-  const thenBlock = ctx.createBlock("if.then");
-  const mergeBlock = ctx.createBlock("if.merge");
+  const thenBlock: LLBlock = ctx.createBlock("if.then");
+  const mergeBlock: LLBlock = ctx.createBlock("if.merge");
 
   if (stmt.elseBody.length > 0) {
-    const elseBlock = ctx.createBlock("if.else");
+    const elseBlock: LLBlock = ctx.createBlock("if.else");
     block.condBr(cond, thenBlock.label, elseBlock.label);
 
     // Compile then body
-    let thenCurrent = thenBlock;
+    let thenCurrent: LLBlock = thenBlock;
     for (let i = 0; i < stmt.thenBody.length; i = i + 1) {
       if (thenCurrent.isTerminated()) break;
       thenCurrent = compileStmt(ctx, thenCurrent, stmt.thenBody[i]);
@@ -143,7 +148,7 @@ function compileIf(ctx: CompilerContext, block: LLBlock, stmt: IfStmt): LLBlock 
     }
 
     // Compile else body
-    let elseCurrent = elseBlock;
+    let elseCurrent: LLBlock = elseBlock;
     for (let i = 0; i < stmt.elseBody.length; i = i + 1) {
       if (elseCurrent.isTerminated()) break;
       elseCurrent = compileStmt(ctx, elseCurrent, stmt.elseBody[i]);
@@ -154,7 +159,7 @@ function compileIf(ctx: CompilerContext, block: LLBlock, stmt: IfStmt): LLBlock 
   } else {
     block.condBr(cond, thenBlock.label, mergeBlock.label);
 
-    let thenCurrent = thenBlock;
+    let thenCurrent: LLBlock = thenBlock;
     for (let i = 0; i < stmt.thenBody.length; i = i + 1) {
       if (thenCurrent.isTerminated()) break;
       thenCurrent = compileStmt(ctx, thenCurrent, stmt.thenBody[i]);
@@ -168,21 +173,21 @@ function compileIf(ctx: CompilerContext, block: LLBlock, stmt: IfStmt): LLBlock 
 }
 
 function compileWhile(ctx: CompilerContext, block: LLBlock, stmt: WhileStmt): LLBlock {
-  const condBlock = ctx.createBlock("while.cond");
-  const bodyBlock = ctx.createBlock("while.body");
-  const exitBlock = ctx.createBlock("while.exit");
+  const condBlock: LLBlock = ctx.createBlock("while.cond");
+  const bodyBlock: LLBlock = ctx.createBlock("while.body");
+  const exitBlock: LLBlock = ctx.createBlock("while.exit");
 
   block.br(condBlock.label);
 
   // Compile condition
   const condResult = compileCondition(ctx, condBlock, stmt.condition);
-  const condFinal = condResult[0];
-  const cond = condResult[1];
+  const condFinal: LLBlock = condResult[0] as LLBlock;
+  const cond: string = condResult[1] as string;
   condFinal.condBr(cond, bodyBlock.label, exitBlock.label);
 
   // Compile body with break/continue targets
   ctx.pushLoop(exitBlock.label, condBlock.label);
-  let bodyCurrent = bodyBlock;
+  let bodyCurrent: LLBlock = bodyBlock;
   for (let i = 0; i < stmt.body.length; i = i + 1) {
     if (bodyCurrent.isTerminated()) break;
     bodyCurrent = compileStmt(ctx, bodyCurrent, stmt.body[i]);
@@ -201,10 +206,10 @@ function compileFor(ctx: CompilerContext, block: LLBlock, stmt: ForStmt): LLBloc
     block = compileStmt(ctx, block, stmt.init);
   }
 
-  const condBlock = ctx.createBlock("for.cond");
-  const bodyBlock = ctx.createBlock("for.body");
-  const updateBlock = ctx.createBlock("for.update");
-  const exitBlock = ctx.createBlock("for.exit");
+  const condBlock: LLBlock = ctx.createBlock("for.cond");
+  const bodyBlock: LLBlock = ctx.createBlock("for.body");
+  const updateBlock: LLBlock = ctx.createBlock("for.update");
+  const exitBlock: LLBlock = ctx.createBlock("for.exit");
 
   if (!block.isTerminated()) {
     block.br(condBlock.label);
@@ -213,8 +218,8 @@ function compileFor(ctx: CompilerContext, block: LLBlock, stmt: ForStmt): LLBloc
   // Compile condition
   if (stmt.condition !== null) {
     const condResult = compileCondition(ctx, condBlock, stmt.condition);
-    const condFinal = condResult[0];
-    const cond = condResult[1];
+    const condFinal: LLBlock = condResult[0] as LLBlock;
+    const cond: string = condResult[1] as string;
     condFinal.condBr(cond, bodyBlock.label, exitBlock.label);
   } else {
     condBlock.br(bodyBlock.label);
@@ -222,7 +227,7 @@ function compileFor(ctx: CompilerContext, block: LLBlock, stmt: ForStmt): LLBloc
 
   // Compile body
   ctx.pushLoop(exitBlock.label, updateBlock.label);
-  let bodyCurrent = bodyBlock;
+  let bodyCurrent: LLBlock = bodyBlock;
   for (let i = 0; i < stmt.body.length; i = i + 1) {
     if (bodyCurrent.isTerminated()) break;
     bodyCurrent = compileStmt(ctx, bodyCurrent, stmt.body[i]);
@@ -235,7 +240,7 @@ function compileFor(ctx: CompilerContext, block: LLBlock, stmt: ForStmt): LLBloc
   // Compile update
   if (stmt.update !== null) {
     const updateResult = compileExpr(ctx, updateBlock, stmt.update);
-    const updateFinal = updateResult[0];
+    const updateFinal: LLBlock = updateResult[0] as LLBlock;
     if (!updateFinal.isTerminated()) {
       updateFinal.br(condBlock.label);
     }
