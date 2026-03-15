@@ -242,6 +242,13 @@ export interface CaptureGetExpr extends Expr {
   closurePtrLocalId: number;
 }
 
+export interface CaptureSetExpr extends Expr {
+  kind: ExprKind.CaptureSet;
+  captureIndex: number;
+  closurePtrLocalId: number;
+  value: Expr;
+}
+
 export interface GlobalGetExpr extends Expr {
   kind: ExprKind.GlobalGet;
   name: string;
@@ -324,6 +331,15 @@ export interface ContinueStmt extends Stmt {
 export interface BlockStmt extends Stmt {
   kind: StmtKind.Block;
   stmts: Array<Stmt>;
+}
+
+export interface TryCatchStmt extends Stmt {
+  kind: StmtKind.TryCatch;
+  tryBody: Array<Stmt>;
+  catchParam: number;  // localId for catch variable (-1 if no catch)
+  catchParamName: string;
+  catchBody: Array<Stmt>;
+  finallyBody: Array<Stmt>;
 }
 
 // --- Top-level ---

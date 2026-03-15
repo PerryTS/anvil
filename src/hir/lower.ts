@@ -23,14 +23,14 @@ import {
   ExprStmt as HirExprStmt, LetStmt, ReturnStmt as HirReturnStmt,
   IfStmt as HirIfStmt, WhileStmt as HirWhileStmt, ForStmt as HirForStmt,
   BreakStmt as HirBreakStmt, ContinueStmt as HirContinueStmt,
-  BlockStmt as HirBlockStmt,
+  BlockStmt as HirBlockStmt, TryCatchStmt,
   NumberExpr, StringExpr, BoolExpr, UndefinedExpr, NullExpr,
   BinaryExpr, BinaryOp, UnaryExpr, UnaryOp,
   CompareExpr, CompareOp, LogicalExpr, LogicalOp,
   LocalGetExpr, LocalSetExpr, CallExpr, FuncRefExpr,
   IfExpr, ArrayExpr, ArrayGetExpr, ArraySetExpr,
   ObjectLitExpr, FieldGetExpr, FieldSetExpr,
-  MethodCallExpr, ClosureExpr, CaptureGetExpr,
+  MethodCallExpr, ClosureExpr, CaptureGetExpr, CaptureSetExpr,
   GlobalGetExpr, GlobalSetExpr,
   TypeofExpr as HirTypeofExpr,
 } from "../hir/ir";
@@ -71,7 +71,9 @@ interface ClassInfo {
   fieldMap: Map<string, number>;
   fieldClassTypes: Map<string, string>;  // field name -> class name (for class-typed fields)
   methods: Map<string, string>;  // method name -> HIR function name
+  methodNames: Array<string>;  // method names in order (for iteration)
   constructorFunc: string | null;
+  superClass: string | null;
 }
 
 export class Lowerer {
@@ -93,8 +95,16 @@ export class Lowerer {
   // Global field name -> index registry (across all interfaces, for fallback lookup)
   private globalFieldIndices: Map<string, number>;
 
+  // Pending statements from expression lowering (e.g., postfix side-effects)
+  private pendingStmts: Array<Stmt>;
   // Well-known runtime function names that map to direct FFI calls
   private runtimeFuncs: Map<string, string>;
+  // Static class members: "ClassName.propName" -> "ClassName$static$propName" (global name)
+  private staticMembers: Map<string, string>;
+  // Static member types: "ClassName.propName" -> Type
+  private staticMemberTypes: Map<string, Type>;
+  // Static property initialization statements (emitted into init body)
+  private staticInits: Array<Stmt>;
 
   constructor() {
     this.nextLocalId = 0;
@@ -104,6 +114,7 @@ export class Lowerer {
     this.interfaceLayouts = new Map();
     this.interfaceFieldOrder = new Map();
     this.globalFieldIndices = new Map();
+    this.pendingStmts = [];
     this.inFunction = false;
     this.moduleLocals = new Map();
     this.moduleGlobalsList = [];
@@ -114,6 +125,9 @@ export class Lowerer {
 
     // Map known global functions/methods to runtime FFI names
     this.runtimeFuncs = new Map();
+    this.staticMembers = new Map();
+    this.staticMemberTypes = new Map();
+    this.staticInits = [];
   }
 
   setSourceDir(dir: string): void {
@@ -200,7 +214,9 @@ export class Lowerer {
       fieldMap: fieldMap,
       fieldClassTypes: fieldClassTypes,
       methods: methods,
+      methodNames: methodNames,
       constructorFunc: ctorName,
+      superClass: null,
     };
     this.scope.classInfos.set(className, classInfo);
     // Also register as interface layout for field access
@@ -293,17 +309,11 @@ export class Lowerer {
       if (stmt.kind === AstStmtKind.ExportDecl) {
         const exportDecl: ExportDeclAst = stmt as ExportDeclAst;
         if (exportDecl.declaration !== null) {
-          const lowered = this.lowerStmt(exportDecl.declaration);
-          if (lowered !== null) {
-            stmts.push(lowered);
-          }
+          this.pushLoweredStmt(stmts, exportDecl.declaration);
         }
         continue;
       }
-      const lowered = this.lowerStmt(stmt);
-      if (lowered !== null) {
-        stmts.push(lowered);
-      }
+      this.pushLoweredStmt(stmts, stmt);
     }
 
     const globalNames: Array<string> = this.moduleGlobalsList;
@@ -319,6 +329,25 @@ export class Lowerer {
   }
 
   // --- Statements ---
+
+  private pushLoweredStmt(stmts: Array<Stmt>, stmt: AstStmt): void {
+    const lowered = this.lowerStmt(stmt);
+    // Drain pending statements first (from postfix expressions etc.)
+    for (let pi = 0; pi < this.pendingStmts.length; pi = pi + 1) {
+      stmts.push(this.pendingStmts[pi]);
+    }
+    this.pendingStmts = [];
+    if (lowered !== null) {
+      stmts.push(lowered);
+    }
+    // Drain static init statements only at module level (not inside function bodies)
+    if (!this.inFunction) {
+      for (let si = 0; si < this.staticInits.length; si = si + 1) {
+        stmts.push(this.staticInits[si]);
+      }
+      this.staticInits = [];
+    }
+  }
 
   private lowerStmt(stmt: AstStmt): Stmt | null {
     if (stmt.kind === AstStmtKind.VarDecl) {
@@ -376,8 +405,7 @@ export class Lowerer {
       const block = stmt as BlockStmtAst;
       const stmts: Array<Stmt> = [];
       for (let i = 0; i < block.body.length; i = i + 1) {
-        const s = this.lowerStmt(block.body[i]);
-        if (s !== null) stmts.push(s);
+        this.pushLoweredStmt(stmts, block.body[i]);
       }
       return { kind: StmtKind.Block, stmts: stmts } as HirBlockStmt;
     }
@@ -395,14 +423,38 @@ export class Lowerer {
       return { kind: StmtKind.Expr, expr: throwCall } as HirExprStmt;
     }
     if (stmt.kind === AstStmtKind.TryCatch) {
-      // TODO: implement try/catch lowering
       const tc = stmt as TryCatchStmtAst;
       const tryStmts: Array<Stmt> = [];
       for (let i = 0; i < tc.tryBody.length; i = i + 1) {
-        const s = this.lowerStmt(tc.tryBody[i]);
-        if (s !== null) tryStmts.push(s);
+        this.pushLoweredStmt(tryStmts, tc.tryBody[i]);
       }
-      return { kind: StmtKind.Block, stmts: tryStmts } as HirBlockStmt;
+      let catchParamId = -1;
+      let catchParamName = "";
+      const catchStmts: Array<Stmt> = [];
+      if (tc.catchParam !== null) {
+        catchParamName = tc.catchParam;
+        catchParamId = this.allocLocal(catchParamName);
+        this.scope.localTypes.set(catchParamName, ANY_TYPE);
+      }
+      if (tc.catchBody !== null) {
+        for (let i = 0; i < tc.catchBody.length; i = i + 1) {
+          this.pushLoweredStmt(catchStmts, tc.catchBody[i]);
+        }
+      }
+      const finallyStmts: Array<Stmt> = [];
+      if (tc.finallyBody !== null) {
+        for (let i = 0; i < tc.finallyBody.length; i = i + 1) {
+          this.pushLoweredStmt(finallyStmts, tc.finallyBody[i]);
+        }
+      }
+      return {
+        kind: StmtKind.TryCatch,
+        tryBody: tryStmts,
+        catchParam: catchParamId,
+        catchParamName: catchParamName,
+        catchBody: catchStmts,
+        finallyBody: finallyStmts,
+      } as TryCatchStmt;
     }
     if (stmt.kind === AstStmtKind.Empty) {
       return null;
@@ -525,7 +577,9 @@ export class Lowerer {
     }
 
     const prevInFunction = this.inFunction;
+    const prevLocalId = this.nextLocalId;
     this.inFunction = true;
+    this.nextLocalId = 0;
     this.pushScope();
 
     const params: Array<[number, string, Type]> = [];
@@ -555,12 +609,13 @@ export class Lowerer {
 
     const body: Array<Stmt> = [];
     for (let i = 0; i < decl.body.length; i = i + 1) {
-      const s = this.lowerStmt(decl.body[i]);
-      if (s !== null) body.push(s);
+      this.pushLoweredStmt(body, decl.body[i]);
     }
 
+    const localCount = this.nextLocalId;
     this.popScope();
     this.inFunction = prevInFunction;
+    this.nextLocalId = prevLocalId;
 
     let fArr = this.functions;
     fArr.push({
@@ -569,7 +624,7 @@ export class Lowerer {
       params: params,
       returnType: returnType,
       body: body,
-      localCount: params.length,
+      localCount: localCount,
     });
     this.functions = fArr;
   }
@@ -630,8 +685,7 @@ export class Lowerer {
       const c: SwitchCase = stmt.cases[i] as SwitchCase;
       const body: Array<Stmt> = [];
       for (let j = 0; j < c.body.length; j = j + 1) {
-        const s = this.lowerStmt(c.body[j]);
-        if (s !== null) body.push(s);
+        this.pushLoweredStmt(body, c.body[j]);
       }
       if (c.test !== null) {
         const test = this.lowerExpr(c.test);
@@ -659,14 +713,13 @@ export class Lowerer {
       const block = stmt as BlockStmtAst;
       const stmts: Array<Stmt> = [];
       for (let i = 0; i < block.body.length; i = i + 1) {
-        const s = this.lowerStmt(block.body[i]);
-        if (s !== null) stmts.push(s);
+        this.pushLoweredStmt(stmts, block.body[i]);
       }
       return stmts;
     }
-    const s = this.lowerStmt(stmt);
-    if (s !== null) return [s];
-    return [];
+    const result: Array<Stmt> = [];
+    this.pushLoweredStmt(result, stmt);
+    return result;
   }
 
   // --- Expressions ---
@@ -824,6 +877,9 @@ export class Lowerer {
     }
 
     if (expr.kind === AstExprKind.Void) {
+      // Evaluate operand for side effects, then return undefined
+      const operand = this.lowerExpr((expr as any).operand);
+      this.pendingStmts.push({ kind: StmtKind.Expr, expr: operand } as HirExprStmt);
       return { kind: ExprKind.Undefined, ty: UNDEFINED_TYPE } as UndefinedExpr;
     }
 
@@ -986,9 +1042,15 @@ export class Lowerer {
     else if (expr.op === ">>") { op = BinaryOp.Shr; }
     else if (expr.op === ">>>") { op = BinaryOp.UShr; }
     else if (expr.op === "**") {
-      // Exponentiation: use Math.pow
-      // TODO: emit runtime call
-      op = BinaryOp.Mul; // placeholder
+      // Exponentiation: lower to Math.pow(left, right) call
+      const left = this.lowerExpr(expr.left);
+      const right = this.lowerExpr(expr.right);
+      return {
+        kind: ExprKind.Call,
+        ty: NUMBER_TYPE,
+        callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: "js_math_pow" } as FuncRefExpr,
+        args: [left, right],
+      } as CallExpr;
     }
     else {
       throw new Error("Unknown binary operator: " + expr.op);
@@ -1029,13 +1091,19 @@ export class Lowerer {
     const operand = expr.operand;
     if (operand.kind === AstExprKind.Identifier) {
       const ident = operand as IdentifierExpr;
-      const localId = this.lookupLocal(ident.name);
-      if (localId !== null) {
+      const captureResult = this.lookupLocalCaptureAware(ident.name);
+      if (captureResult !== null) {
         const one: NumberExpr = { kind: ExprKind.Number, ty: NUMBER_TYPE, value: 1 };
-        const get: LocalGetExpr = { kind: ExprKind.LocalGet, ty: NUMBER_TYPE, localId: localId, name: ident.name };
         const binOp = expr.op === "++" ? BinaryOp.Add : BinaryOp.Sub;
+        if (captureResult[1]) {
+          // Captured variable: CaptureGet + CaptureSet
+          const get: CaptureGetExpr = { kind: ExprKind.CaptureGet, ty: NUMBER_TYPE, captureIndex: captureResult[2], closurePtrLocalId: captureResult[3] };
+          const add: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: binOp, left: get, right: one };
+          return { kind: ExprKind.CaptureSet, ty: NUMBER_TYPE, captureIndex: captureResult[2], closurePtrLocalId: captureResult[3], value: add } as CaptureSetExpr;
+        }
+        const get: LocalGetExpr = { kind: ExprKind.LocalGet, ty: NUMBER_TYPE, localId: captureResult[0], name: ident.name };
         const add: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: binOp, left: get, right: one };
-        return { kind: ExprKind.LocalSet, ty: NUMBER_TYPE, localId: localId, name: ident.name, value: add } as LocalSetExpr;
+        return { kind: ExprKind.LocalSet, ty: NUMBER_TYPE, localId: captureResult[0], name: ident.name, value: add } as LocalSetExpr;
       }
     }
     // Fallback: just return the operand
@@ -1043,7 +1111,31 @@ export class Lowerer {
   }
 
   private lowerPostfix(expr: UnaryPostfixExprAst): Expr {
-    // x++ => (tmp = x, x = x + 1, tmp) -- simplified to just x = x + 1
+    // x++ => (x = x + 1) - 1, i.e. increment x but return old value
+    // x-- => (x = x - 1) + 1
+    if (expr.operand.kind === AstExprKind.Identifier) {
+      const ident = expr.operand as IdentifierExpr;
+      const captureResult = this.lookupLocalCaptureAware(ident.name);
+      if (captureResult !== null) {
+        const one: NumberExpr = { kind: ExprKind.Number, ty: NUMBER_TYPE, value: 1 };
+        const incOp = expr.op === "++" ? BinaryOp.Add : BinaryOp.Sub;
+        const reverseOp = expr.op === "++" ? BinaryOp.Sub : BinaryOp.Add;
+        const one2: NumberExpr = { kind: ExprKind.Number, ty: NUMBER_TYPE, value: 1 };
+        if (captureResult[1]) {
+          // Captured variable
+          const get: CaptureGetExpr = { kind: ExprKind.CaptureGet, ty: NUMBER_TYPE, captureIndex: captureResult[2], closurePtrLocalId: captureResult[3] };
+          const incExpr: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: incOp, left: get, right: one };
+          const setExpr: CaptureSetExpr = { kind: ExprKind.CaptureSet, ty: NUMBER_TYPE, captureIndex: captureResult[2], closurePtrLocalId: captureResult[3], value: incExpr };
+          return { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: reverseOp, left: setExpr, right: one2 } as BinaryExpr;
+        }
+        const localId = captureResult[0];
+        const get: LocalGetExpr = { kind: ExprKind.LocalGet, ty: NUMBER_TYPE, localId: localId, name: ident.name };
+        const incExpr: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: incOp, left: get, right: one };
+        const setExpr: LocalSetExpr = { kind: ExprKind.LocalSet, ty: NUMBER_TYPE, localId: localId, name: ident.name, value: incExpr };
+        return { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: reverseOp, left: setExpr, right: one2 } as BinaryExpr;
+      }
+    }
+    // Fallback: just do pre-increment behavior
     return this.lowerPreIncDec({ kind: AstExprKind.Unary, line: expr.line, col: expr.col, op: expr.op, operand: expr.operand } as UnaryExprAst);
   }
 
@@ -1051,6 +1143,10 @@ export class Lowerer {
     const funcName = "$closure_" + this.nextFuncId;
     const funcId = this.nextFuncId;
     this.nextFuncId = this.nextFuncId + 1;
+
+    // Save and reset local ID counter for the new function scope
+    const prevLocalId = this.nextLocalId;
+    this.nextLocalId = 0;
 
     // Push a closure scope
     this.pushScope();
@@ -1077,8 +1173,7 @@ export class Lowerer {
       // Block body: array of statements
       const stmts = arrowBody as Array<AstStmt>;
       for (let i = 0; i < stmts.length; i = i + 1) {
-        const s = this.lowerStmt(stmts[i]);
-        if (s !== null) body.push(s);
+        this.pushLoweredStmt(body, stmts[i]);
       }
     } else {
       // Expression body: treat as return expr
@@ -1098,6 +1193,7 @@ export class Lowerer {
 
     const localCount = this.nextLocalId;
     this.popScope();
+    this.nextLocalId = prevLocalId;
 
     // Register the closure function
     let fArr2 = this.functions;
@@ -1126,6 +1222,63 @@ export class Lowerer {
   }
 
   private lowerCall(expr: CallExprAst): Expr {
+    // Handle super(args) constructor call
+    if (expr.callee.kind === AstExprKind.Super) {
+      // Find current class and its parent
+      const currentClassName = this.lookupVarClass("this");
+      if (currentClassName !== null) {
+        const currentClassInfo = this.lookupClassInfo(currentClassName);
+        if (currentClassInfo !== null && currentClassInfo.superClass !== null) {
+          const parentCtorName = currentClassInfo.superClass + "$new";
+          const parentCtorId = this.lookupFunction(parentCtorName);
+          // super(args) calls parent constructor, which returns the object
+          // We need to pass our 'this' object's fields into the parent constructor
+          // Actually, in Perry's model: super(args) calls parent$new(args) which returns a new object.
+          // Then we copy the parent fields into our 'this'.
+          // Simpler approach: call parent constructor, then set our 'this' fields from the result.
+          const args: Array<Expr> = [];
+          for (let i = 0; i < expr.args.length; i = i + 1) {
+            args.push(this.lowerExpr(expr.args[i]));
+          }
+          // Call parent constructor to get the initialized parent part
+          const parentObj: CallExpr = {
+            kind: ExprKind.Call,
+            ty: ANY_TYPE,
+            callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: parentCtorId !== null ? parentCtorId : 0, name: parentCtorName } as FuncRefExpr,
+            args: args,
+          };
+          // Copy parent fields from the returned object to 'this'
+          const parentInfo = this.lookupClassInfo(currentClassInfo.superClass);
+          if (parentInfo !== null) {
+            // Store parent result in a temp, then copy each field
+            // Use Assign to generate: let $super = parentCtor(args)
+            const superLocal = this.allocLocal("$super");
+            this.pendingStmts.push({
+              kind: StmtKind.Let,
+              localId: superLocal,
+              name: "$super",
+              ty: ANY_TYPE,
+              init: parentObj,
+            } as LetStmt);
+            const thisExpr: LocalGetExpr = { kind: ExprKind.LocalGet, ty: ANY_TYPE, localId: this.lookupLocal("this") as number, name: "this" };
+            const superExpr: LocalGetExpr = { kind: ExprKind.LocalGet, ty: ANY_TYPE, localId: superLocal, name: "$super" };
+            for (let fi = 0; fi < parentInfo.fieldNames.length; fi = fi + 1) {
+              const fName = parentInfo.fieldNames[fi];
+              const fIdx = parentInfo.fieldMap.get(fName);
+              if (fIdx !== undefined) {
+                // this.field = $super.field
+                const getField: FieldGetExpr = { kind: ExprKind.FieldGet, ty: ANY_TYPE, object: superExpr, field: fName, fieldIndex: fIdx };
+                const setField: FieldSetExpr = { kind: ExprKind.FieldSet, ty: ANY_TYPE, object: thisExpr, field: fName, fieldIndex: fIdx, value: getField };
+                this.pendingStmts.push({ kind: StmtKind.Expr, expr: setField } as HirExprStmt);
+              }
+            }
+          }
+          // super() call doesn't return a useful value; return undefined
+          return { kind: ExprKind.Undefined, ty: UNDEFINED_TYPE } as UndefinedExpr;
+        }
+      }
+    }
+
     // Special case: method calls on known objects
     if (expr.callee.kind === AstExprKind.Member) {
       const member = expr.callee as MemberExprAst;
@@ -1161,6 +1314,20 @@ export class Lowerer {
         const obj = member.object as IdentifierExpr;
         const runtimeName = this.resolveBuiltinCall(obj.name, member.property, expr.args.length);
         if (runtimeName !== null) {
+          // Math.min/max with >2 args: chain pairwise calls
+          if ((runtimeName === "llvm.minnum.f64" || runtimeName === "llvm.maxnum.f64") && expr.args.length > 2) {
+            let result: Expr = this.lowerExpr(expr.args[0]);
+            for (let i = 1; i < expr.args.length; i = i + 1) {
+              const arg = this.lowerExpr(expr.args[i]);
+              result = {
+                kind: ExprKind.Call,
+                ty: NUMBER_TYPE,
+                callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: runtimeName } as FuncRefExpr,
+                args: [result, arg],
+              } as CallExpr;
+            }
+            return result;
+          }
           const args: Array<Expr> = [];
           // path.resolve with 1 arg: prepend process.cwd() as first arg
           if (runtimeName === "pd_path_resolve" && expr.args.length === 1) {
@@ -1179,6 +1346,23 @@ export class Lowerer {
             ty: ANY_TYPE,
             callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: runtimeName } as FuncRefExpr,
             args: args,
+          } as CallExpr;
+        }
+
+        // Static method call: ClassName.method()
+        const staticMethodName = obj.name + "$static$" + member.property;
+        const staticMethodId = this.lookupFunction(staticMethodName);
+        if (staticMethodId !== null) {
+          const staticArgs: Array<Expr> = [];
+          for (let i = 0; i < expr.args.length; i = i + 1) {
+            staticArgs.push(this.lowerExpr(expr.args[i]));
+          }
+          const sRetType = this.lookupFuncReturnType(staticMethodName);
+          return {
+            kind: ExprKind.Call,
+            ty: sRetType,
+            callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: staticMethodId, name: staticMethodName } as FuncRefExpr,
+            args: staticArgs,
           } as CallExpr;
         }
 
@@ -1482,6 +1666,17 @@ export class Lowerer {
       }
     }
 
+    // Handle static member access: ClassName.prop -> GlobalGet
+    if (expr.object.kind === AstExprKind.Identifier) {
+      const ident = expr.object as IdentifierExpr;
+      const staticKey = ident.name + "." + expr.property;
+      const staticGlobal = this.staticMembers.get(staticKey);
+      if (staticGlobal !== undefined) {
+        const sTy = this.staticMemberTypes.get(staticKey);
+        return { kind: ExprKind.GlobalGet, ty: sTy !== undefined ? sTy : ANY_TYPE, name: staticGlobal } as GlobalGetExpr;
+      }
+    }
+
     // Handle .length on arrays and strings -> MethodCall with no args
     if (expr.property === "length" && expr.object.kind === AstExprKind.Identifier) {
       const ident = expr.object as IdentifierExpr;
@@ -1640,9 +1835,14 @@ export class Lowerer {
         this.addModuleGlobal(ident.name);
         return { kind: ExprKind.GlobalSet, ty: value.ty, name: ident.name, value: value } as GlobalSetExpr;
       }
-      const localId = this.lookupLocal(ident.name);
-      if (localId !== null) {
-        return { kind: ExprKind.LocalSet, ty: value.ty, localId: localId, name: ident.name, value: value } as LocalSetExpr;
+      // Check capture-aware lookup for closure variables
+      const captureResult = this.lookupLocalCaptureAware(ident.name);
+      if (captureResult !== null) {
+        if (captureResult[1]) {
+          // Writing to a captured variable
+          return { kind: ExprKind.CaptureSet, ty: value.ty, captureIndex: captureResult[2], closurePtrLocalId: captureResult[3], value: value } as CaptureSetExpr;
+        }
+        return { kind: ExprKind.LocalSet, ty: value.ty, localId: captureResult[0], name: ident.name, value: value } as LocalSetExpr;
       }
       // Create new local
       const newId = this.allocLocal(ident.name);
@@ -1652,6 +1852,15 @@ export class Lowerer {
     // Member assignment: obj.prop = expr
     if (expr.target.kind === AstExprKind.Member) {
       const member = expr.target as MemberExprAst;
+      // Check for static member assignment: ClassName.prop = x
+      if (member.object.kind === AstExprKind.Identifier) {
+        const ident = member.object as IdentifierExpr;
+        const staticKey = ident.name + "." + member.property;
+        const staticGlobal = this.staticMembers.get(staticKey);
+        if (staticGlobal !== undefined) {
+          return { kind: ExprKind.GlobalSet, ty: value.ty, name: staticGlobal, value: value } as GlobalSetExpr;
+        }
+      }
       const obj = this.lowerExpr(member.object);
       let fieldIndex = 0;
       if (member.object.kind === AstExprKind.Identifier) {
@@ -1727,6 +1936,10 @@ export class Lowerer {
     else if (expr.op === "&=") binOp = "&";
     else if (expr.op === "|=") binOp = "|";
     else if (expr.op === "^=") binOp = "^";
+    else if (expr.op === "<<=") binOp = "<<";
+    else if (expr.op === ">>=") binOp = ">>";
+    else if (expr.op === ">>>=") binOp = ">>>";
+    else if (expr.op === "**=") binOp = "**";
     else {
       throw new Error("Unknown compound assignment: " + expr.op);
     }
@@ -1882,8 +2095,9 @@ export class Lowerer {
 
     for (let i = 0; i < decl.members.length; i = i + 1) {
       const member: ClassMemberAst = decl.members[i] as ClassMemberAst;
-      if (member.kind === "method" && !member.isStatic) {
-        const methodName = decl.name + "$" + member.name;
+      if (member.kind === "method") {
+        const prefix = member.isStatic ? decl.name + "$static$" : decl.name + "$";
+        const methodName = prefix + member.name;
         const methodId = this.nextFuncId;
         this.nextFuncId = this.nextFuncId + 1;
         this.scope.functions.set(methodName, methodId);
@@ -1914,6 +2128,27 @@ export class Lowerer {
     const fieldMap: Map<string, number> = new Map();
     const methods: Map<string, string> = new Map();
     let constructorMember: ClassMemberAst | null = null;
+
+    // Inherit parent class fields if this class extends another
+    if (decl.superClass !== null) {
+      const parentInfo = this.lookupClassInfo(decl.superClass);
+      if (parentInfo !== null) {
+        // Copy parent fields in order (they get indices 0..N-1)
+        for (let pi = 0; pi < parentInfo.fieldNames.length; pi = pi + 1) {
+          const pFieldName = parentInfo.fieldNames[pi];
+          fieldMap.set(pFieldName, fieldNames.length);
+          fieldNames.push(pFieldName);
+        }
+        // Inherit parent methods
+        for (let pi = 0; pi < parentInfo.methodNames.length; pi = pi + 1) {
+          const mName = parentInfo.methodNames[pi];
+          const mFuncName = parentInfo.methods.get(mName);
+          if (mFuncName !== undefined) {
+            methods.set(mName, mFuncName);
+          }
+        }
+      }
+    }
 
     const fieldClassTypes: Map<string, string> = new Map();
     for (let i = 0; i < decl.members.length; i = i + 1) {
@@ -1957,12 +2192,23 @@ export class Lowerer {
       }
     }
 
+    // Collect method names for iteration
+    const methodNamesList: Array<string> = [];
+    for (let i = 0; i < decl.members.length; i = i + 1) {
+      const m: ClassMemberAst = decl.members[i] as ClassMemberAst;
+      if (m.kind === "method" && !m.isStatic) {
+        methodNamesList.push(m.name);
+      }
+    }
+
     const classInfo: ClassInfo = {
       fieldNames: fieldNames,
       fieldMap: fieldMap,
       fieldClassTypes: fieldClassTypes,
       methods: methods,
+      methodNames: methodNamesList,
       constructorFunc: null,
+      superClass: decl.superClass,
     };
 
     // Use pre-registered constructor function
@@ -1979,7 +2225,9 @@ export class Lowerer {
     this.scope.fieldLayouts.set(decl.name, fieldMap);
 
     const prevInFunction2 = this.inFunction;
+    const prevLocalId2 = this.nextLocalId;
     this.inFunction = true;
+    this.nextLocalId = 0;
     this.pushScope();
 
     // The constructor receives user params. 'this' is allocated inside.
@@ -2044,8 +2292,7 @@ export class Lowerer {
     // Lower constructor body
     if (constructorMember !== null && constructorMember.body !== null) {
       for (let i = 0; i < constructorMember.body.length; i = i + 1) {
-        const s = this.lowerStmt(constructorMember.body[i]);
-        if (s !== null) ctorBody.push(s);
+        this.pushLoweredStmt(ctorBody, constructorMember.body[i]);
       }
     }
 
@@ -2055,8 +2302,10 @@ export class Lowerer {
       value: { kind: ExprKind.LocalGet, ty: ANY_TYPE, localId: thisId, name: "this" } as LocalGetExpr,
     } as HirReturnStmt);
 
+    const ctorLocalCount = this.nextLocalId;
     this.popScope();
     this.inFunction = prevInFunction2;
+    this.nextLocalId = prevLocalId2;
 
     let fArr3 = this.functions;
     fArr3.push({
@@ -2065,7 +2314,7 @@ export class Lowerer {
       params: ctorParams,
       returnType: ANY_TYPE,
       body: ctorBody,
-      localCount: ctorParams.length + 1,
+      localCount: ctorLocalCount,
     });
     this.functions = fArr3;
 
@@ -2089,7 +2338,9 @@ export class Lowerer {
         }
 
         const prevInFunc3 = this.inFunction;
+        const prevLocalId3 = this.nextLocalId;
         this.inFunction = true;
+        this.nextLocalId = 0;
         this.pushScope();
 
         // 'this' is the first parameter
@@ -2113,14 +2364,15 @@ export class Lowerer {
 
         const methodBody: Array<Stmt> = [];
         for (let j = 0; j < member.body.length; j = j + 1) {
-          const s = this.lowerStmt(member.body[j]);
-          if (s !== null) methodBody.push(s);
+          this.pushLoweredStmt(methodBody, member.body[j]);
         }
 
         const retType = member.returnType !== null ? this.resolveType(member.returnType) : ANY_TYPE;
 
+        const methodLocalCount = this.nextLocalId;
         this.popScope();
         this.inFunction = prevInFunc3;
+        this.nextLocalId = prevLocalId3;
 
         let fArr4 = this.functions;
         fArr4.push({
@@ -2129,9 +2381,82 @@ export class Lowerer {
           params: methodParams,
           returnType: retType,
           body: methodBody,
-          localCount: methodParams.length,
+          localCount: methodLocalCount,
         });
         this.functions = fArr4;
+      }
+    }
+
+    // Register static properties as module globals BEFORE compiling static methods
+    for (let i = 0; i < decl.members.length; i = i + 1) {
+      const member: ClassMemberAst = decl.members[i] as ClassMemberAst;
+      if (member.kind === "property" && member.isStatic) {
+        const globalName = decl.name + "$static$" + member.name;
+        const staticKey = decl.name + "." + member.name;
+        this.staticMembers.set(staticKey, globalName);
+        const memberTy = member.typeAnnotation !== null ? this.resolveType(member.typeAnnotation) : ANY_TYPE;
+        this.staticMemberTypes.set(staticKey, memberTy);
+        this.addModuleGlobal(globalName);
+        if (member.initializer !== null) {
+          const initVal = this.lowerExpr(member.initializer);
+          this.staticInits.push({
+            kind: StmtKind.Expr,
+            expr: { kind: ExprKind.GlobalSet, ty: initVal.ty, name: globalName, value: initVal } as GlobalSetExpr,
+          } as HirExprStmt);
+        }
+      }
+    }
+
+    // Generate static methods
+    for (let i = 0; i < decl.members.length; i = i + 1) {
+      const member: ClassMemberAst = decl.members[i] as ClassMemberAst;
+      if (member.kind === "method" && member.isStatic && member.body !== null) {
+        const staticMethodName = decl.name + "$static$" + member.name;
+        const staticMethodId = this.lookupFunction(staticMethodName);
+        if (staticMethodId === null) {
+          throw new Error("Static method not pre-registered: " + staticMethodName);
+        }
+
+        const prevInFuncS = this.inFunction;
+        const prevLocalIdS = this.nextLocalId;
+        this.inFunction = true;
+        this.nextLocalId = 0;
+        this.pushScope();
+
+        const staticParams: Array<[number, string, Type]> = [];
+        if (member.params !== null) {
+          for (let j = 0; j < member.params.length; j = j + 1) {
+            const p: ParamDecl = member.params[j] as ParamDecl;
+            const ty = p.typeAnnotation !== null ? this.resolveType(p.typeAnnotation) : ANY_TYPE;
+            const localId = this.allocLocal(p.name, ty);
+            staticParams.push([localId, p.name, ty]);
+          }
+        }
+
+        this.scope.classInfos.set(decl.name, classInfo);
+
+        const staticBody: Array<Stmt> = [];
+        for (let j = 0; j < member.body.length; j = j + 1) {
+          this.pushLoweredStmt(staticBody, member.body[j]);
+        }
+
+        const sRetType = member.returnType !== null ? this.resolveType(member.returnType) : ANY_TYPE;
+
+        const staticLocalCount = this.nextLocalId;
+        this.popScope();
+        this.inFunction = prevInFuncS;
+        this.nextLocalId = prevLocalIdS;
+
+        let fArr5 = this.functions;
+        fArr5.push({
+          id: staticMethodId,
+          name: staticMethodName,
+          params: staticParams,
+          returnType: sRetType,
+          body: staticBody,
+          localCount: staticLocalCount,
+        });
+        this.functions = fArr5;
       }
     }
   }

@@ -3,7 +3,7 @@
 import {
   Stmt, StmtKind, Expr, ExprKind,
   ExprStmt, LetStmt, ReturnStmt, IfStmt, WhileStmt, ForStmt,
-  BreakStmt, ContinueStmt, BlockStmt,
+  BreakStmt, ContinueStmt, BlockStmt, TryCatchStmt,
 } from "../hir/ir";
 import { TypeKind, isNumber, isBoolean } from "../hir/types";
 import { LLBlock } from "../llvm/block";
@@ -70,6 +70,10 @@ export function compileStmt(ctx: CompilerContext, block: LLBlock, stmt: Stmt): L
       block = compileStmt(ctx, block, s.stmts[i]);
     }
     return block;
+  }
+
+  if (stmt.kind === StmtKind.TryCatch) {
+    return compileTryCatch(ctx, block, stmt as TryCatchStmt);
   }
 
   throw new Error("Unsupported stmt kind: " + stmt.kind);
@@ -249,4 +253,83 @@ function compileFor(ctx: CompilerContext, block: LLBlock, stmt: ForStmt): LLBloc
   }
 
   return exitBlock;
+}
+
+const PTR: string = "ptr";
+
+function compileTryCatch(ctx: CompilerContext, block: LLBlock, stmt: TryCatchStmt): LLBlock {
+  // 1. Push a try frame and get the jmp_buf pointer
+  const jmpbufPtr = block.call(PTR, "js_try_push", []);
+
+  // 2. Call setjmp(jmpbuf) - returns 0 normally, non-zero on exception
+  const setjmpResult = block.call(I32, "setjmp", [[PTR, jmpbufPtr]]);
+  const isException = block.icmpNe(I32, setjmpResult, "0");
+
+  const tryBlock: LLBlock = ctx.createBlock("try.body");
+  const catchBlock: LLBlock = ctx.createBlock("try.catch");
+  const mergeBlock: LLBlock = ctx.createBlock("try.merge");
+
+  block.condBr(isException, catchBlock.label, tryBlock.label);
+
+  // 3. Compile try body
+  let tryCurrent: LLBlock = tryBlock;
+  for (let i = 0; i < stmt.tryBody.length; i = i + 1) {
+    if (tryCurrent.isTerminated()) break;
+    tryCurrent = compileStmt(ctx, tryCurrent, stmt.tryBody[i]);
+  }
+  // End the try block
+  if (!tryCurrent.isTerminated()) {
+    tryCurrent.callVoid("js_try_end", []);
+  }
+
+  // 4. Handle finally for try path (if present)
+  if (stmt.finallyBody.length > 0 && !tryCurrent.isTerminated()) {
+    tryCurrent.callVoid("js_enter_finally", []);
+    for (let i = 0; i < stmt.finallyBody.length; i = i + 1) {
+      if (tryCurrent.isTerminated()) break;
+      tryCurrent = compileStmt(ctx, tryCurrent, stmt.finallyBody[i]);
+    }
+    if (!tryCurrent.isTerminated()) {
+      tryCurrent.callVoid("js_leave_finally", []);
+    }
+  }
+  if (!tryCurrent.isTerminated()) {
+    tryCurrent.br(mergeBlock.label);
+  }
+
+  // 5. Compile catch body
+  let catchCurrent: LLBlock = catchBlock;
+  // End the try frame
+  catchCurrent.callVoid("js_try_end", []);
+
+  if (stmt.catchParam >= 0) {
+    // Get exception value and store to catch param local
+    const excVal = catchCurrent.call(DOUBLE, "js_get_exception", []);
+    const catchPtr = catchCurrent.alloca(DOUBLE);
+    ctx.setLocal(stmt.catchParam, catchPtr);
+    catchCurrent.store(DOUBLE, excVal, catchPtr);
+  }
+  catchCurrent.callVoid("js_clear_exception", []);
+
+  for (let i = 0; i < stmt.catchBody.length; i = i + 1) {
+    if (catchCurrent.isTerminated()) break;
+    catchCurrent = compileStmt(ctx, catchCurrent, stmt.catchBody[i]);
+  }
+
+  // 6. Handle finally for catch path (if present)
+  if (stmt.finallyBody.length > 0 && !catchCurrent.isTerminated()) {
+    catchCurrent.callVoid("js_enter_finally", []);
+    for (let i = 0; i < stmt.finallyBody.length; i = i + 1) {
+      if (catchCurrent.isTerminated()) break;
+      catchCurrent = compileStmt(ctx, catchCurrent, stmt.finallyBody[i]);
+    }
+    if (!catchCurrent.isTerminated()) {
+      catchCurrent.callVoid("js_leave_finally", []);
+    }
+  }
+  if (!catchCurrent.isTerminated()) {
+    catchCurrent.br(mergeBlock.label);
+  }
+
+  return mergeBlock;
 }

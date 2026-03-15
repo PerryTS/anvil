@@ -66,7 +66,8 @@ export function declareRuntimeFunctions(mod: LLModule): void {
 
   // --- Type checks ---
   mod.declareFunction("js_is_truthy", I32, [DOUBLE]);
-  mod.declareFunction("js_typeof", I64, [DOUBLE]);
+  mod.declareFunction("js_typeof", I64, [DOUBLE]);  // unused, kept for compat
+  mod.declareFunction("js_value_typeof", PTR, [DOUBLE]);
   mod.declareFunction("js_number_coerce", DOUBLE, [DOUBLE]);
   mod.declareFunction("js_parse_int", DOUBLE, [I64, DOUBLE]);
   mod.declareFunction("js_array_is_array", DOUBLE, [DOUBLE]);
@@ -159,10 +160,17 @@ export function declareRuntimeFunctions(mod: LLModule): void {
 
   // --- Error/exceptions ---
   mod.declareFunction("js_throw", VOID, [DOUBLE]);
-  mod.declareFunction("js_try_enter", I32, [PTR]);
-  mod.declareFunction("js_try_exit", VOID, []);
-  mod.declareFunction("js_get_current_exception", DOUBLE, []);
+  mod.declareFunction("js_try_push", PTR, []);
+  mod.declareFunction("js_try_end", VOID, []);
+  mod.declareFunction("js_get_exception", DOUBLE, []);
+  mod.declareFunction("js_clear_exception", VOID, []);
+  mod.declareFunction("js_enter_finally", VOID, []);
+  mod.declareFunction("js_leave_finally", VOID, []);
+  mod.declareFunction("setjmp", I32, [PTR]);
 
   // --- Dispatch init ---
   mod.declareFunction("js_stdlib_init_dispatch", VOID, []);
+
+  // --- Stubs (from stubs.c) ---
+  mod.declareFunction("pd_add_dynamic", DOUBLE, [DOUBLE, DOUBLE]);
 }

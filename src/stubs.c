@@ -338,6 +338,58 @@ double pd_fs_unlink_sync(double path_val) {
 }
 
 // ============================================================
+// Dynamic add (handles number+number and string+string)
+// ============================================================
+
+// NaN-boxing tag masks
+static const unsigned long long STRING_TAG_MASK = 0x7FFF000000000000ULL;
+static const unsigned long long TAG_MASK        = 0xFFFF000000000000ULL;
+static const unsigned long long POINTER_MASK_VAL = 0x0000FFFFFFFFFFFFULL;
+
+extern long long js_string_concat(long long a, long long b);
+extern long long js_jsvalue_to_string(double val);
+
+static unsigned long long f64_to_i64(double d) {
+    unsigned long long bits;
+    memcpy(&bits, &d, sizeof(bits));
+    return bits;
+}
+
+// pd_add_dynamic(a, b) -> nanboxed result
+// If either operand is a string, concatenate as strings.
+// Otherwise, add as numbers.
+double pd_add_dynamic(double a, double b) {
+    unsigned long long a_bits = f64_to_i64(a);
+    unsigned long long b_bits = f64_to_i64(b);
+    unsigned long long a_tag = a_bits & TAG_MASK;
+    unsigned long long b_tag = b_bits & TAG_MASK;
+
+    int a_is_string = (a_tag == STRING_TAG_MASK);
+    int b_is_string = (b_tag == STRING_TAG_MASK);
+
+    if (a_is_string || b_is_string) {
+        // String concatenation
+        long long a_str, b_str;
+        if (a_is_string) {
+            a_str = (long long)(a_bits & POINTER_MASK_VAL);
+        } else {
+            a_str = js_jsvalue_to_string(a);
+        }
+        if (b_is_string) {
+            b_str = (long long)(b_bits & POINTER_MASK_VAL);
+        } else {
+            b_str = js_jsvalue_to_string(b);
+        }
+        long long result = js_string_concat(a_str, b_str);
+        return js_nanbox_string(result);
+    }
+
+    // Numeric addition
+    extern double js_add(double a, double b);
+    return js_add(a, b);
+}
+
+// ============================================================
 // execSync
 // ============================================================
 

@@ -7,8 +7,9 @@ import {
   LocalGetExpr, LocalSetExpr, CallExpr, FuncRefExpr, IfExpr,
   ArrayExpr, ArrayGetExpr, ArraySetExpr,
   ObjectLitExpr, FieldGetExpr, FieldSetExpr,
-  MethodCallExpr, Int32Expr, ClosureExpr, CaptureGetExpr,
+  MethodCallExpr, Int32Expr, ClosureExpr, CaptureGetExpr, CaptureSetExpr,
   GlobalGetExpr, GlobalSetExpr,
+  TypeofExpr,
 } from "../hir/ir";
 import { TypeKind, isDynamic, isNumber, isString, isBoolean, Type, FunctionType } from "../hir/types";
 import { LLBlock } from "../llvm/block";
@@ -170,6 +171,22 @@ export function compileExpr(ctx: CompilerContext, block: LLBlock, expr: Expr): [
 
   if (expr.kind === ExprKind.CaptureGet) {
     return compileCaptureGet(ctx, block, expr as CaptureGetExpr);
+  }
+
+  if (expr.kind === ExprKind.CaptureSet) {
+    return compileCaptureSet(ctx, block, expr as CaptureSetExpr);
+  }
+
+  if (expr.kind === ExprKind.Typeof) {
+    const e = expr as TypeofExpr;
+    const operandResult = compileExpr(ctx, block, e.operand);
+    block = operandResult[0];
+    const operandVal = operandResult[1];
+    // js_value_typeof returns a *mut StringHeader (ptr)
+    const strPtr = block.call(PTR, "js_value_typeof", [[DOUBLE, operandVal]]);
+    const strI64 = block.ptrtoint(strPtr, I64);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, strI64]]);
+    return [block, boxed];
   }
 
   throw new Error("Unsupported expr kind: " + expr.kind);
@@ -442,19 +459,15 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
   if (method === "has") {
     const mapPtr = unboxPointer(block, objVal);
     const result = block.call(I32, "js_map_has", [[PTR, mapPtr], [DOUBLE, argVals[0]]]);
-    const isTrue = block.icmpNe(I32, result, "0");
-    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
-    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
-    return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
+    const dbl = block.sitofp(I32, result, DOUBLE);
+    return [block, dbl];
   }
 
   if (method === "delete") {
     const mapPtr = unboxPointer(block, objVal);
     const result = block.call(I32, "js_map_delete", [[PTR, mapPtr], [DOUBLE, argVals[0]]]);
-    const isTrue = block.icmpNe(I32, result, "0");
-    const trueVal = block.bitcastI64ToDouble(TAG_TRUE_I64);
-    const falseVal = block.bitcastI64ToDouble(TAG_FALSE_I64);
-    return [block, block.select(I1, isTrue, DOUBLE, trueVal, falseVal)];
+    const dbl = block.sitofp(I32, result, DOUBLE);
+    return [block, dbl];
   }
 
   if (method === "size") {
@@ -651,6 +664,20 @@ function compileCaptureGet(ctx: CompilerContext, block: LLBlock, expr: CaptureGe
   return [block, result];
 }
 
+function compileCaptureSet(ctx: CompilerContext, block: LLBlock, expr: CaptureSetExpr): [LLBlock, string] {
+  // Compile the value to store
+  const valResult = compileExpr(ctx, block, expr.value);
+  block = valResult[0];
+  const val = valResult[1];
+  // Load closure pointer from the first param
+  const closurePtrSlot = ctx.getLocal(expr.closurePtrLocalId);
+  const closurePtrBoxed = block.load(DOUBLE, closurePtrSlot);
+  const closurePtr = unboxPointer(block, closurePtrBoxed);
+  // Write the capture
+  block.callVoid("js_closure_set_capture_f64", [[PTR, closurePtr], [I32, expr.captureIndex.toString()], [DOUBLE, val]]);
+  return [block, val];
+}
+
 // --- Binary ---
 
 function compileBinary(ctx: CompilerContext, block: LLBlock, expr: BinaryExpr): [LLBlock, string] {
@@ -732,7 +759,9 @@ function compileBinary(ctx: CompilerContext, block: LLBlock, expr: BinaryExpr): 
 
   // Fallback: use runtime dynamic ops (JSValue is repr(transparent) u64 -> bitcast double<->i64)
   if (expr.op === BinaryOp.Add) {
-    return [block, callJSValueBinaryOp(block, "js_add", left, right)];
+    // Use pd_add_dynamic which handles both number+number and string+string
+    const result = block.call(DOUBLE, "pd_add_dynamic", [[DOUBLE, left], [DOUBLE, right]]);
+    return [block, result];
   }
   if (expr.op === BinaryOp.Sub) {
     return [block, callJSValueBinaryOp(block, "js_sub", left, right)];

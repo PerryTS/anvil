@@ -37,7 +37,11 @@ export function compileLLToObject(llFile: string, objFile: string): void {
 // Link .o + runtime into final executable
 export function linkExecutable(objFile: string, runtimePath: string, outputPath: string): void {
   // Compile stubs if available
-  const stubsC = path.resolve(__dirname, "../stubs.c");
+  // Look for stubs.c: first next to __dirname/../, then in src/
+  let stubsC = path.resolve(__dirname, "../stubs.c");
+  if (!fs.existsSync(stubsC)) {
+    stubsC = path.resolve(__dirname, "../../src/stubs.c");
+  }
   let stubsArg = "";
   if (fs.existsSync(stubsC)) {
     const stubsO = outputPath + "_stubs.o";
