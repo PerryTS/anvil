@@ -257,6 +257,7 @@ export class Lowerer {
       // Register imports early so they're available during function lowering
       if (stmt.kind === AstStmtKind.ImportDecl) {
         const importDecl: ImportDeclAst = stmt as ImportDeclAst;
+        const isPerryUi = importDecl.source === "perry/ui";
         for (let j = 0; j < importDecl.specifiers.length; j = j + 1) {
           const spec: ImportSpecifier = importDecl.specifiers[j] as ImportSpecifier;
           const localName: string = spec.local;
@@ -267,7 +268,9 @@ export class Lowerer {
           const funcId = this.nextFuncId;
           this.nextFuncId = this.nextFuncId + 1;
           this.scope.functions.set(localName, funcId);
-          this.externalFuncs.push([funcId, localName]);
+          // Map perry/ui imports to their C function names
+          const externalName = isPerryUi ? mapPerryUiName(localName) : localName;
+          this.externalFuncs.push([funcId, externalName]);
         }
         if (importDecl.namespaceImport !== null) {
           const nsName: string = importDecl.namespaceImport;
@@ -325,8 +328,12 @@ export class Lowerer {
       }
     }
 
-    // Detect boxed vars at module level
-    this.boxedVars = this.detectBoxedVars(sourceFile.statements);
+    // Detect boxed vars at module level — but don't actually box them.
+    // Module-level variables are LLVM globals, which are already shared mutable cells.
+    // Functions access them via GlobalGet/GlobalSet, not CaptureGet/CaptureSet,
+    // so wrapping their init values in $box_alloc would break comparisons
+    // (the global would hold a box pointer instead of the actual value).
+    this.boxedVars = new Map();
 
     // Second pass: lower all statements
     for (let i = 0; i < sourceFile.statements.length; i = i + 1) {
@@ -1948,7 +1955,7 @@ export class Lowerer {
           }
           return {
             kind: ExprKind.MethodCall,
-            ty: ANY_TYPE,
+            ty: this.stringMethodReturnType(member.property),
             object: objExpr,
             method: "str_" + member.property,
             args: args,
@@ -2000,6 +2007,21 @@ export class Lowerer {
           args: args,
         } as MethodCallExpr;
       }
+      // When the object is known to be a string, prefer string methods over array methods
+      // (indexOf, includes, slice exist in both lists)
+      if (this.isStringMethod(member.property) && objExpr.ty.kind === TypeKind.String) {
+        const args: Array<Expr> = [];
+        for (let i = 0; i < expr.args.length; i = i + 1) {
+          args.push(this.lowerExpr(expr.args[i]));
+        }
+        return {
+          kind: ExprKind.MethodCall,
+          ty: this.stringMethodReturnType(member.property),
+          object: objExpr,
+          method: "str_" + member.property,
+          args: args,
+        } as MethodCallExpr;
+      }
       if (this.isArrayMethod(member.property) || this.isMapMethod(member.property) || this.isSetMethod(member.property)) {
         const args: Array<Expr> = [];
         for (let i = 0; i < expr.args.length; i = i + 1) {
@@ -2020,7 +2042,7 @@ export class Lowerer {
         }
         return {
           kind: ExprKind.MethodCall,
-          ty: ANY_TYPE,
+          ty: this.stringMethodReturnType(member.property),
           object: objExpr,
           method: "str_" + member.property,
           args: args,
@@ -2240,6 +2262,24 @@ export class Lowerer {
            name === "startsWith" || name === "endsWith" || name === "includes" ||
            name === "replace" || name === "toUpperCase" || name === "toLowerCase" ||
            name === "substring" || name === "match";
+  }
+
+  private stringMethodReturnType(name: string): Type {
+    // Methods that return strings
+    if (name === "slice" || name === "trim" || name === "charAt" ||
+        name === "replace" || name === "toUpperCase" || name === "toLowerCase" ||
+        name === "substring") {
+      return STRING_TYPE;
+    }
+    // Methods that return numbers
+    if (name === "indexOf" || name === "charCodeAt") {
+      return NUMBER_TYPE;
+    }
+    // Methods that return booleans
+    if (name === "startsWith" || name === "endsWith" || name === "includes") {
+      return BOOLEAN_TYPE;
+    }
+    return ANY_TYPE;
   }
 
   private resolveMathConstant(name: string): number | null {
@@ -4370,4 +4410,66 @@ export class Lowerer {
     // Don't recurse into nested arrow/function expressions
     return false;
   }
+}
+
+// Map perry/ui TypeScript function names to their perry_ui_* C function names
+function mapPerryUiName(tsName: string): string {
+  // Widget constructors — route through pd_ui_* bridge wrappers
+  // (these handle NaN-boxed double <-> i64 handle/string conversions)
+  if (tsName === "App") return "pd_ui_App";
+  if (tsName === "Text") return "pd_ui_Text";
+  if (tsName === "Button") return "pd_ui_Button";
+  if (tsName === "HStack") return "pd_ui_HStack";
+  if (tsName === "VStack") return "pd_ui_VStack";
+  if (tsName === "VStackWithInsets") return "pd_ui_VStackWithInsets";
+  if (tsName === "HStackWithInsets") return "pd_ui_HStackWithInsets";
+  if (tsName === "ScrollView") return "pd_ui_ScrollView";
+  if (tsName === "Spacer") return "pd_ui_Spacer";
+  if (tsName === "Divider") return "pd_ui_Divider";
+  if (tsName === "TextField") return "pd_ui_TextField";
+
+  // Widget hierarchy
+  if (tsName === "widgetAddChild") return "pd_ui_widgetAddChild";
+  if (tsName === "widgetClearChildren") return "pd_ui_widgetClearChildren";
+
+  // Widget properties
+  if (tsName === "widgetSetBackgroundColor") return "pd_ui_widgetSetBackgroundColor";
+  if (tsName === "widgetSetEdgeInsets") return "pd_ui_widgetSetEdgeInsets";
+  if (tsName === "widgetSetOnClick") return "pd_ui_widgetSetOnClick";
+
+  // Text properties
+  if (tsName === "textSetFontSize") return "pd_ui_textSetFontSize";
+  if (tsName === "textSetFontWeight") return "pd_ui_textSetFontWeight";
+  if (tsName === "textSetColor") return "pd_ui_textSetColor";
+  if (tsName === "textSetSelectable") return "pd_ui_textSetSelectable";
+  if (tsName === "textSetString") return "pd_ui_textSetString";
+  if (tsName === "textSetWraps") return "pd_ui_textSetWraps";
+
+  // Button properties
+  if (tsName === "buttonSetBordered") return "pd_ui_buttonSetBordered";
+
+  // TextField
+  if (tsName === "textfieldFocus") return "pd_ui_textfieldFocus";
+  if (tsName === "textfieldSetString") return "pd_ui_textfieldSetString";
+  if (tsName === "textfieldGetString") return "pd_ui_textfieldGetString";
+
+  // ScrollView
+  if (tsName === "scrollviewSetChild") return "pd_ui_scrollviewSetChild";
+  if (tsName === "scrollviewSetOffset") return "pd_ui_scrollviewSetOffset";
+  if (tsName === "scrollviewGetOffset") return "pd_ui_scrollviewGetOffset";
+
+  // Keyboard
+  if (tsName === "addKeyboardShortcut") return "pd_ui_addKeyboardShortcut";
+
+  // Clipboard
+  if (tsName === "clipboardRead") return "pd_ui_clipboardRead";
+  if (tsName === "clipboardWrite") return "pd_ui_clipboardWrite";
+
+  // Menu
+  if (tsName === "menuCreate") return "pd_ui_menuCreate";
+  if (tsName === "menuAddItem") return "pd_ui_menuAddItem";
+  if (tsName === "widgetSetContextMenu") return "pd_ui_widgetSetContextMenu";
+
+  // Fallback: use perry_ui_ prefix directly (will need wrapper if types mismatch)
+  return "perry_ui_" + tsName;
 }

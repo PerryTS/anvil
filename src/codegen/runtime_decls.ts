@@ -89,6 +89,12 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_object_set_field_by_name", VOID, [PTR, PTR, DOUBLE]);
   // js_object_clone_with_extra(src_f64: f64, extra_count: i32, keys_ptr: ptr, keys_len: i32) -> *mut ObjectHeader
   mod.declareFunction("js_object_clone_with_extra", PTR, [DOUBLE, I32, PTR, I32]);
+  // pd_dynamic_get(obj: f64, key: f64) -> f64 — handles string/array/object indexing
+  mod.declareFunction("pd_dynamic_get", DOUBLE, [DOUBLE, DOUBLE]);
+  // pd_dynamic_set(obj: f64, key: f64, val: f64) -> f64
+  mod.declareFunction("pd_dynamic_set", DOUBLE, [DOUBLE, DOUBLE, DOUBLE]);
+  // pd_dynamic_length(obj: f64) -> i32 — .length for string or array
+  mod.declareFunction("pd_dynamic_length", I32, [DOUBLE]);
   // js_object_values(obj: *const ObjectHeader) -> *mut ArrayHeader
   mod.declareFunction("js_object_values", PTR, [PTR]);
   // js_object_entries(obj: *const ObjectHeader) -> *mut ArrayHeader

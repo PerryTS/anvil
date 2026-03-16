@@ -63,6 +63,88 @@ static double i64_to_f64(unsigned long long bits) {
 }
 
 // ============================================================
+// Dynamic property access (handles string, array, and object)
+// ============================================================
+
+extern double js_array_get_f64(void* arr, int index);
+extern void js_array_set_f64(void* arr, int index, double val);
+extern long long js_string_char_at(long long str_handle, int index);
+extern double js_object_get_field_by_name_f64(void* obj_ptr, long long name_str);
+extern void js_object_set_field_by_name(void* obj_ptr, long long name_str, double val);
+
+static int is_nanbox_string(double val) {
+    unsigned long long bits;
+    memcpy(&bits, &val, sizeof(bits));
+    unsigned long long tag = bits >> 48;
+    return tag == 0x7FFF;
+}
+
+// pd_dynamic_get(obj, key) -> value
+// Dispatches based on obj/key types:
+//   str[number] -> js_string_char_at
+//   arr[number] -> js_array_get_f64
+//   obj[string] -> js_object_get_field_by_name_f64
+double pd_dynamic_get(double obj, double key) {
+    if (key == key) {
+        // Key is a regular number (not NaN)
+        int idx = (int)key;
+        if (is_nanbox_string(obj)) {
+            // String character access
+            unsigned long long bits;
+            memcpy(&bits, &obj, sizeof(bits));
+            long long str_handle = (long long)(bits & 0x0000FFFFFFFFFFFFULL);
+            long long char_handle = js_string_char_at(str_handle, idx);
+            return js_nanbox_string(char_handle);
+        } else {
+            // Array element access
+            void* arr_ptr = (void*)js_nanbox_get_pointer(obj);
+            return js_array_get_f64(arr_ptr, idx);
+        }
+    } else {
+        // Key is NaN-boxed (string) — object field access by name
+        long long obj_i64 = js_nanbox_get_pointer(obj);
+        unsigned long long key_bits;
+        memcpy(&key_bits, &key, sizeof(key_bits));
+        long long key_str = (long long)(key_bits & 0x0000FFFFFFFFFFFFULL);
+        return js_object_get_field_by_name_f64((void*)obj_i64, key_str);
+    }
+}
+
+// pd_dynamic_set(obj, key, value)
+double pd_dynamic_set(double obj, double key, double val) {
+    if (key == key) {
+        // Numeric index — array set
+        void* arr_ptr = (void*)js_nanbox_get_pointer(obj);
+        js_array_set_f64(arr_ptr, (int)key, val);
+    } else {
+        // String key — object field set by name
+        long long obj_i64 = js_nanbox_get_pointer(obj);
+        unsigned long long key_bits;
+        memcpy(&key_bits, &key, sizeof(key_bits));
+        long long key_str = (long long)(key_bits & 0x0000FFFFFFFFFFFFULL);
+        js_object_set_field_by_name((void*)obj_i64, key_str, val);
+    }
+    return val;
+}
+
+// pd_dynamic_length(obj) -> i32 length
+// Returns .length for strings or arrays
+extern int js_array_length(void* arr);
+extern int js_string_length(long long str_handle);
+
+int pd_dynamic_length(double obj) {
+    if (is_nanbox_string(obj)) {
+        unsigned long long bits;
+        memcpy(&bits, &obj, sizeof(bits));
+        long long str_handle = (long long)(bits & 0x0000FFFFFFFFFFFFULL);
+        return js_string_length(str_handle);
+    } else {
+        void* ptr = (void*)js_nanbox_get_pointer(obj);
+        return js_array_length(ptr);
+    }
+}
+
+// ============================================================
 // Global argc/argv storage
 // ============================================================
 static int g_argc = 0;
@@ -432,6 +514,303 @@ double pd_add_dynamic(double a, double b) {
 // execSync
 // ============================================================
 
+// js_stdlib_process_pending() - called by UI event loop internals
+// Stub: no pending stdlib work in anvil-compiled binaries
+void js_stdlib_process_pending(void) {
+    // no-op
+}
+
+#ifdef PERRY_UI_STUBS
+// ============================================================
+// Perry UI bridge wrappers
+// Anvil passes all args as NaN-boxed doubles. These wrappers
+// unbox handles/strings to i64 and call the real perry_ui_* C functions.
+// ============================================================
+
+// Perry UI extern declarations
+extern long long perry_ui_app_create(long long title_ptr, double width, double height);
+extern void perry_ui_app_set_body(long long app_handle, long long body_handle);
+extern void perry_ui_app_run(long long app_handle);
+extern long long perry_ui_text_create(long long text_ptr);
+extern long long perry_ui_button_create(long long label_ptr, double on_press);
+extern long long perry_ui_hstack_create(double spacing);
+extern long long perry_ui_vstack_create(double spacing);
+extern long long perry_ui_vstack_create_with_insets(double spacing, double top, double left, double bottom, double right);
+extern long long perry_ui_hstack_create_with_insets(double spacing, double top, double left, double bottom, double right);
+extern long long perry_ui_scrollview_create(void);
+extern long long perry_ui_spacer_create(void);
+extern long long perry_ui_divider_create(void);
+extern void perry_ui_widget_add_child(long long parent, long long child);
+extern void perry_ui_widget_clear_children(long long handle);
+extern void perry_ui_scrollview_set_child(long long scroll, long long child);
+extern void perry_ui_scrollview_set_offset(long long scroll, double offset);
+extern double perry_ui_scrollview_get_offset(long long scroll);
+extern void perry_ui_text_set_color(long long handle, double r, double g, double b, double a);
+extern void perry_ui_text_set_font_size(long long handle, double size);
+extern void perry_ui_text_set_font_weight(long long handle, double size, double weight);
+extern void perry_ui_text_set_selectable(long long handle, double selectable);
+extern void perry_ui_text_set_string(long long handle, long long text_ptr);
+extern void perry_ui_text_set_wraps(long long handle, double max_width);
+extern void perry_ui_button_set_bordered(long long handle, double bordered);
+extern void perry_ui_textfield_focus(long long handle);
+extern void perry_ui_add_keyboard_shortcut(long long key_ptr, double modifiers, double callback);
+extern double perry_ui_clipboard_read(void);
+extern void perry_ui_clipboard_write(long long text_ptr);
+extern void perry_ui_widget_set_background_color(long long handle, double r, double g, double b, double a);
+extern void perry_ui_widget_set_edge_insets(long long handle, double top, double left, double bottom, double right);
+extern void perry_ui_widget_set_on_click(long long handle, double callback);
+extern long long perry_ui_textfield_create(long long placeholder_ptr, double on_change);
+extern void perry_ui_textfield_set_string(long long handle, long long text_ptr);
+extern long long perry_ui_textfield_get_string(long long handle);
+
+// Runtime function for extracting string pointer from NaN-boxed string
+extern long long js_get_string_pointer_unified(double val);
+
+// Helper: unbox a NaN-boxed handle to i64
+static long long unbox_handle(double val) {
+    return js_nanbox_get_pointer(val);
+}
+
+// Helper: box an i64 handle to NaN-boxed double
+static double box_handle(long long handle) {
+    return js_nanbox_pointer(handle);
+}
+
+// Helper: unbox a NaN-boxed string to raw StringHeader* (i64)
+static long long unbox_string(double val) {
+    return js_get_string_pointer_unified(val);
+}
+
+// pd_ui_App(config_object) -> NaN-boxed handle
+// Desugars: App({title, width, height, body}) -> app_create + app_set_body + app_run
+double pd_ui_App(double config_val) {
+    void* config_ptr = (void*)unbox_handle(config_val);
+    // Get fields by name
+    long long title_name = js_string_from_bytes("title", 5);
+    long long width_name = js_string_from_bytes("width", 5);
+    long long height_name = js_string_from_bytes("height", 6);
+    long long body_name = js_string_from_bytes("body", 4);
+
+    double title_f64 = js_object_get_field_by_name_f64(config_ptr, title_name);
+    double width_f64 = js_object_get_field_by_name_f64(config_ptr, width_name);
+    double height_f64 = js_object_get_field_by_name_f64(config_ptr, height_name);
+    double body_f64 = js_object_get_field_by_name_f64(config_ptr, body_name);
+
+    long long title_ptr = unbox_string(title_f64);
+    long long body_handle = unbox_handle(body_f64);
+
+    long long app_handle = perry_ui_app_create(title_ptr, width_f64, height_f64);
+    perry_ui_app_set_body(app_handle, body_handle);
+    perry_ui_app_run(app_handle);
+    return box_handle(app_handle);
+}
+
+// pd_ui_Text(text) -> NaN-boxed handle
+double pd_ui_Text(double text_val) {
+    long long text_ptr = unbox_string(text_val);
+    long long handle = perry_ui_text_create(text_ptr);
+    return box_handle(handle);
+}
+
+// pd_ui_Button(label, on_press) -> NaN-boxed handle
+double pd_ui_Button(double label_val, double on_press) {
+    long long label_ptr = unbox_string(label_val);
+    long long handle = perry_ui_button_create(label_ptr, on_press);
+    return box_handle(handle);
+}
+
+// pd_ui_HStack(spacing) -> NaN-boxed handle
+double pd_ui_HStack(double spacing) {
+    long long handle = perry_ui_hstack_create(spacing);
+    return box_handle(handle);
+}
+
+// pd_ui_VStack(spacing) -> NaN-boxed handle
+double pd_ui_VStack(double spacing) {
+    long long handle = perry_ui_vstack_create(spacing);
+    return box_handle(handle);
+}
+
+// pd_ui_VStackWithInsets(spacing, top, left, bottom, right) -> NaN-boxed handle
+double pd_ui_VStackWithInsets(double spacing, double top, double left, double bottom, double right) {
+    long long handle = perry_ui_vstack_create_with_insets(spacing, top, left, bottom, right);
+    return box_handle(handle);
+}
+
+// pd_ui_HStackWithInsets(spacing, top, left, bottom, right) -> NaN-boxed handle
+double pd_ui_HStackWithInsets(double spacing, double top, double left, double bottom, double right) {
+    long long handle = perry_ui_hstack_create_with_insets(spacing, top, left, bottom, right);
+    return box_handle(handle);
+}
+
+// pd_ui_ScrollView() -> NaN-boxed handle
+double pd_ui_ScrollView(void) {
+    long long handle = perry_ui_scrollview_create();
+    return box_handle(handle);
+}
+
+// pd_ui_Spacer() -> NaN-boxed handle
+double pd_ui_Spacer(void) {
+    long long handle = perry_ui_spacer_create();
+    return box_handle(handle);
+}
+
+// pd_ui_Divider() -> NaN-boxed handle
+double pd_ui_Divider(void) {
+    long long handle = perry_ui_divider_create();
+    return box_handle(handle);
+}
+
+// pd_ui_widgetAddChild(parent, child)
+double pd_ui_widgetAddChild(double parent_val, double child_val) {
+    perry_ui_widget_add_child(unbox_handle(parent_val), unbox_handle(child_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_widgetClearChildren(handle)
+double pd_ui_widgetClearChildren(double handle_val) {
+    perry_ui_widget_clear_children(unbox_handle(handle_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_scrollviewSetChild(scroll, child)
+double pd_ui_scrollviewSetChild(double scroll_val, double child_val) {
+    perry_ui_scrollview_set_child(unbox_handle(scroll_val), unbox_handle(child_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_scrollviewSetOffset(scroll, offset)
+double pd_ui_scrollviewSetOffset(double scroll_val, double offset) {
+    perry_ui_scrollview_set_offset(unbox_handle(scroll_val), offset);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_scrollviewGetOffset(scroll) -> f64
+double pd_ui_scrollviewGetOffset(double scroll_val) {
+    return perry_ui_scrollview_get_offset(unbox_handle(scroll_val));
+}
+
+// pd_ui_textSetColor(handle, r, g, b, a)
+double pd_ui_textSetColor(double handle_val, double r, double g, double b, double a) {
+    perry_ui_text_set_color(unbox_handle(handle_val), r, g, b, a);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textSetFontSize(handle, size)
+double pd_ui_textSetFontSize(double handle_val, double size) {
+    perry_ui_text_set_font_size(unbox_handle(handle_val), size);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textSetFontWeight(handle, size, weight)
+double pd_ui_textSetFontWeight(double handle_val, double size, double weight) {
+    perry_ui_text_set_font_weight(unbox_handle(handle_val), size, weight);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textSetSelectable(handle, selectable)
+double pd_ui_textSetSelectable(double handle_val, double selectable) {
+    perry_ui_text_set_selectable(unbox_handle(handle_val), selectable);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textSetString(handle, text)
+double pd_ui_textSetString(double handle_val, double text_val) {
+    perry_ui_text_set_string(unbox_handle(handle_val), unbox_string(text_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textSetWraps(handle, maxWidth)
+double pd_ui_textSetWraps(double handle_val, double max_width) {
+    perry_ui_text_set_wraps(unbox_handle(handle_val), max_width);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_buttonSetBordered(handle, bordered)
+double pd_ui_buttonSetBordered(double handle_val, double bordered) {
+    perry_ui_button_set_bordered(unbox_handle(handle_val), bordered);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textfieldFocus(handle)
+double pd_ui_textfieldFocus(double handle_val) {
+    perry_ui_textfield_focus(unbox_handle(handle_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_addKeyboardShortcut(key, modifiers, callback)
+double pd_ui_addKeyboardShortcut(double key_val, double modifiers, double callback) {
+    perry_ui_add_keyboard_shortcut(unbox_string(key_val), modifiers, callback);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_clipboardRead() -> NaN-boxed string
+double pd_ui_clipboardRead(void) {
+    return perry_ui_clipboard_read();
+}
+
+// pd_ui_clipboardWrite(text)
+double pd_ui_clipboardWrite(double text_val) {
+    perry_ui_clipboard_write(unbox_string(text_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_widgetSetBackgroundColor(handle, r, g, b, a)
+double pd_ui_widgetSetBackgroundColor(double handle_val, double r, double g, double b, double a) {
+    perry_ui_widget_set_background_color(unbox_handle(handle_val), r, g, b, a);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_widgetSetEdgeInsets(handle, top, left, bottom, right)
+double pd_ui_widgetSetEdgeInsets(double handle_val, double top, double left, double bottom, double right) {
+    perry_ui_widget_set_edge_insets(unbox_handle(handle_val), top, left, bottom, right);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_widgetSetOnClick(handle, callback)
+double pd_ui_widgetSetOnClick(double handle_val, double callback) {
+    perry_ui_widget_set_on_click(unbox_handle(handle_val), callback);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_TextField(placeholder, onChange) -> NaN-boxed handle
+double pd_ui_TextField(double placeholder_val, double on_change) {
+    long long placeholder_ptr = unbox_string(placeholder_val);
+    long long handle = perry_ui_textfield_create(placeholder_ptr, on_change);
+    return box_handle(handle);
+}
+
+// pd_ui_textfieldSetString(handle, text)
+double pd_ui_textfieldSetString(double handle_val, double text_val) {
+    perry_ui_textfield_set_string(unbox_handle(handle_val), unbox_string(text_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+// pd_ui_textfieldGetString(handle) -> NaN-boxed string
+double pd_ui_textfieldGetString(double handle_val) {
+    long long str_ptr = perry_ui_textfield_get_string(unbox_handle(handle_val));
+    return js_nanbox_string(str_ptr);
+}
+
+// Menu
+extern long long perry_ui_menu_create(void);
+extern void perry_ui_menu_add_item(long long menu_handle, long long title_ptr, double callback);
+extern void perry_ui_widget_set_context_menu(long long widget_handle, long long menu_handle);
+
+double pd_ui_menuCreate(void) {
+    return box_handle(perry_ui_menu_create());
+}
+
+double pd_ui_menuAddItem(double menu_val, double title_val, double callback) {
+    perry_ui_menu_add_item(unbox_handle(menu_val), unbox_string(title_val), callback);
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
+double pd_ui_widgetSetContextMenu(double widget_val, double menu_val) {
+    perry_ui_widget_set_context_menu(unbox_handle(widget_val), unbox_handle(menu_val));
+    return i64_to_f64(TAG_UNDEFINED);
+}
+
 // execSync(cmd_val, opts_val) -> nanboxed string result
 double execSync(double cmd_val, double opts_val) {
     char cmd[8192];
@@ -447,3 +826,4 @@ double execSync(double cmd_val, double opts_val) {
     long long str_handle = js_string_from_bytes("", 0);
     return js_nanbox_string(str_handle);
 }
+#endif // PERRY_UI_STUBS

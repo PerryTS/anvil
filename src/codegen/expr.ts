@@ -130,7 +130,16 @@ export function compileExpr(ctx: CompilerContext, block: LLBlock, expr: Expr): [
 
   if (expr.kind === ExprKind.FuncRef) {
     const e: FuncRefExpr = expr as FuncRefExpr;
-    return [block, "@" + ctx.getFuncName(e.funcId)];
+    // When used as a value (not a call target), wrap in a closure so it can be
+    // called via js_closure_callN. Named functions don't have the closure env
+    // first param, so we generate a trampoline wrapper that ignores the env.
+    const funcName = ctx.getFuncName(e.funcId);
+    const funcInfo = ctx.getFuncInfo(e.funcId);
+    const paramCount = funcInfo !== null ? funcInfo.params.length : 0;
+    const trampolineName = ctx.getOrCreateTrampoline(funcName, paramCount);
+    const closurePtr = block.call(PTR, "js_closure_alloc", [[PTR, "@" + trampolineName], [I32, "0"]]);
+    const boxed = boxPointer(block, closurePtr);
+    return [block, boxed];
   }
 
   if (expr.kind === ExprKind.If) {
@@ -280,13 +289,34 @@ function compileArrayGet(ctx: CompilerContext, block: LLBlock, expr: ArrayGetExp
   block = idxResult[0];
   const idxVal = idxResult[1];
 
+  // If the object is a string and the index is numeric, use js_string_char_at
+  if (expr.array.ty.kind === TypeKind.String) {
+    const strHandle = unboxString(block, arrVal);
+    const idx = block.fptosi(DOUBLE, idxVal, I32);
+    const resultHandle = block.call(I64, "js_string_char_at", [[I64, strHandle], [I32, idx]]);
+    const boxed = block.call(DOUBLE, "js_nanbox_string", [[I64, resultHandle]]);
+    return [block, boxed];
+  }
+
+  // If either side is Any, use pd_dynamic_get which handles strings, arrays, and objects
+  if (expr.array.ty.kind === TypeKind.Any || expr.index.ty.kind === TypeKind.Any) {
+    const result = block.call(DOUBLE, "pd_dynamic_get", [[DOUBLE, arrVal], [DOUBLE, idxVal]]);
+    return [block, result];
+  }
+
   // Extract raw pointer from NaN-boxed value
   const arrPtr = unboxPointer(block, arrVal);
 
-  // Convert index from f64 to i32
-  const idx = block.fptosi(DOUBLE, idxVal, I32);
+  // If index is known to be a string (e.g. from for-in), use object field access
+  if (expr.index.ty.kind === TypeKind.String) {
+    const keyStr = unboxString(block, idxVal);
+    const keyPtr = block.inttoptr(I64, keyStr);
+    const result = block.call(DOUBLE, "js_object_get_field_by_name_f64", [[PTR, arrPtr], [PTR, keyPtr]]);
+    return [block, result];
+  }
 
-  // Call js_array_get_f64
+  // Default: numeric index on array
+  const idx = block.fptosi(DOUBLE, idxVal, I32);
   const result = block.call(DOUBLE, "js_array_get_f64", [[PTR, arrPtr], [I32, idx]]);
   return [block, result];
 }
@@ -309,6 +339,20 @@ function compileArraySet(ctx: CompilerContext, block: LLBlock, expr: ArraySetExp
 
   // Extract raw pointer from NaN-boxed value
   const arrPtr = unboxPointer(block, arrVal);
+
+  // If index is a string, use object field-by-name set
+  if (expr.index.ty.kind === TypeKind.String) {
+    const keyStr = unboxString(block, idxVal);
+    const keyPtr = block.inttoptr(I64, keyStr);
+    block.callVoid("js_object_set_field_by_name", [[PTR, arrPtr], [PTR, keyPtr], [DOUBLE, val]]);
+    return [block, val];
+  }
+
+  // If index type is Any, use pd_dynamic_set which handles arrays and objects
+  if (expr.index.ty.kind === TypeKind.Any) {
+    block.call(DOUBLE, "pd_dynamic_set", [[DOUBLE, arrVal], [DOUBLE, idxVal], [DOUBLE, val]]);
+    return [block, val];
+  }
 
   // Convert index from f64 to i32
   const idx = block.fptosi(DOUBLE, idxVal, I32);
@@ -525,7 +569,17 @@ function compileMethodCall(ctx: CompilerContext, block: LLBlock, expr: MethodCal
   }
 
   if (method === "length") {
-    // .length is lowered as a method call with 0 args
+    if (expr.object.ty.kind === TypeKind.String) {
+      const strHandle = unboxString(block, objVal);
+      const len = block.call(I32, "js_string_length", [[I64, strHandle]]);
+      const lenF64 = block.sitofp(I32, len, DOUBLE);
+      return [block, lenF64];
+    }
+    if (expr.object.ty.kind === TypeKind.Any) {
+      const len = block.call(I32, "pd_dynamic_length", [[DOUBLE, objVal]]);
+      const lenF64 = block.sitofp(I32, len, DOUBLE);
+      return [block, lenF64];
+    }
     const arrPtr = unboxPointer(block, objVal);
     const len = block.call(I32, "js_array_length", [[PTR, arrPtr]]);
     const lenF64 = block.sitofp(I32, len, DOUBLE);
@@ -1155,8 +1209,12 @@ function compileCompare(ctx: CompilerContext, block: LLBlock, expr: CompareExpr)
   const right = rightResult[1];
 
   const bothNum = isNumber(expr.left.ty) && isNumber(expr.right.ty);
+  const eitherNum = isNumber(expr.left.ty) || isNumber(expr.right.ty);
 
-  if (bothNum) {
+  // For ordering comparisons (<, <=, >, >=), use fcmp when either side is numeric.
+  // fcmp on NaN-boxed non-numbers returns false (NaN is unordered), which is correct JS behavior.
+  // This avoids bugs in js_jsvalue_compare with negative numbers.
+  if (bothNum || (eitherNum && expr.op !== CompareOp.Eq && expr.op !== CompareOp.StrictEq && expr.op !== CompareOp.Ne && expr.op !== CompareOp.StrictNe)) {
     let cmpResult: string;
     if (expr.op === CompareOp.Eq || expr.op === CompareOp.StrictEq) {
       cmpResult = block.fcmp("oeq", left, right);
@@ -1464,7 +1522,14 @@ function compileCall(ctx: CompilerContext, block: LLBlock, expr: CallExpr): [LLB
     }
 
     const funcInfo = ctx.getFuncInfo(funcRef.funcId);
-    const funcName = funcInfo !== null ? funcInfo.name : funcRef.name;
+    let funcName: string;
+    if (funcInfo !== null) {
+      funcName = funcInfo.name;
+    } else if (funcRef.funcId > 0 && ctx.hasFuncName(funcRef.funcId)) {
+      funcName = ctx.getFuncName(funcRef.funcId);
+    } else {
+      funcName = funcRef.name;
+    }
     const args: Array<[string, string]> = [];
     for (let i = 0; i < argVals.length; i = i + 1) {
       args.push([DOUBLE, argVals[i][0]]);

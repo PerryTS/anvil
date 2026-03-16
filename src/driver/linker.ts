@@ -62,12 +62,18 @@ export function linkExecutable(objFile: string, runtimePath: string, outputPath:
 }
 
 // Link multiple .o files + runtime into final executable
-export function linkMultipleObjects(objFiles: Array<string>, runtimePath: string, outputPath: string): void {
+export function linkMultipleObjects(objFiles: Array<string>, runtimePath: string, outputPath: string, extraLibs?: Array<string>): void {
   let cmd = "cc";
   for (let i = 0; i < objFiles.length; i = i + 1) {
     cmd = cmd + " " + quote(objFiles[i]);
   }
-  cmd = cmd + " " + quote(runtimePath) + " -lSystem -lresolv -liconv -o " + quote(outputPath);
+  cmd = cmd + " " + quote(runtimePath);
+  if (extraLibs !== undefined) {
+    for (let i = 0; i < extraLibs.length; i = i + 1) {
+      cmd = cmd + " " + extraLibs[i];
+    }
+  }
+  cmd = cmd + " -lSystem -lresolv -liconv -o " + quote(outputPath);
   console.error("[anvil] Linking " + objFiles.length + " object files...");
   execSync(cmd, { stdio: "inherit" });
 }

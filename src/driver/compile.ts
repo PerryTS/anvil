@@ -541,6 +541,38 @@ export function compileMultiFile(options: CompileOptions): void {
     // Lower to HIR
     const hirModule = lowerer.lower(ast);
 
+    // Prefix external function names from relative imports with their source module's prefix
+    // This matches the function name prefixing done in compileModule for non-entry modules
+    {
+      // Build map: function name -> source module prefix, from relative imports
+      const funcNameToPrefix: Map<string, string> = new Map();
+      for (let si = 0; si < ast.statements.length; si = si + 1) {
+        const s = ast.statements[si];
+        if (s.kind !== 16) continue; // ImportDecl
+        const importD = s as any;
+        const impSource: string = importD.source;
+        if (!impSource.startsWith(".")) continue;
+        let depPath = path.resolve(sourceDir, impSource);
+        if (!depPath.endsWith(".ts")) { depPath = depPath + ".ts"; }
+        // Only prefix for non-entry dep modules (entry module functions are not prefixed)
+        if (depPath === entryFile) continue;
+        const srcModName = fileToModuleName(depPath, baseDir);
+        for (let sj = 0; sj < importD.specifiers.length; sj = sj + 1) {
+          const spec = importD.specifiers[sj];
+          const localName: string = spec.local;
+          funcNameToPrefix.set(localName, srcModName + "__");
+        }
+      }
+      // Now prefix external func names that match relative imports
+      for (let ef = 0; ef < hirModule.externalFuncs.length; ef = ef + 1) {
+        const extName = hirModule.externalFuncs[ef][1];
+        const prefix = funcNameToPrefix.get(extName);
+        if (prefix !== undefined) {
+          hirModule.externalFuncs[ef][1] = prefix + extName;
+        }
+      }
+    }
+
     // Generate LLVM IR
     let llvmIR: string;
     if (isEntry) {
@@ -566,15 +598,54 @@ export function compileMultiFile(options: CompileOptions): void {
   }
 
   // Step 4: Compile and include stubs for missing runtime functions
-  const stubsC = path.resolve(path.dirname(entryFile), "stubs.c");
+  let stubsC = path.resolve(path.dirname(entryFile), "stubs.c");
+  if (!fs.existsSync(stubsC)) {
+    // Also look in Anvil's own source directory
+    stubsC = path.resolve(__dirname, "../../src/stubs.c");
+  }
+  if (!fs.existsSync(stubsC)) {
+    stubsC = path.resolve(__dirname, "../stubs.c");
+  }
+  // Step 5: Detect if perry/ui is used and gather extra link libraries
+  const extraLibs: Array<string> = [];
+  let usesPerryUi = false;
+  for (let mi = 0; mi < modules.length; mi = mi + 1) {
+    const src = fs.readFileSync(modules[mi], "utf-8");
+    if (src.indexOf("perry/ui") >= 0) {
+      usesPerryUi = true;
+      break;
+    }
+  }
+  if (usesPerryUi) {
+    // Find and link perry UI library
+    const uiLibCandidates: Array<string> = [
+      path.resolve(path.dirname(options.runtimePath), "libperry_ui_macos.a"),
+      "/Users/amlug/projects/perry/target/release/libperry_ui_macos.a",
+    ];
+    for (let ci = 0; ci < uiLibCandidates.length; ci = ci + 1) {
+      if (fs.existsSync(uiLibCandidates[ci])) {
+        extraLibs.push(uiLibCandidates[ci]);
+        break;
+      }
+    }
+    // AppKit and Cocoa frameworks needed for UI
+    extraLibs.push("-framework AppKit");
+    extraLibs.push("-framework UniformTypeIdentifiers");
+    extraLibs.push("-framework Security");
+    extraLibs.push("-lobjc");
+  }
+
+  // Step 6: Compile and include stubs
   if (fs.existsSync(stubsC)) {
     const stubsO = options.outputFile + "_stubs.o";
-    compileLLToObject(stubsC, stubsO);
+    const stubsFlags = usesPerryUi ? " -DPERRY_UI_STUBS" : "";
+    const stubsCmd = "clang -c " + stubsC + stubsFlags + " -o " + stubsO;
+    require("child_process").execSync(stubsCmd, { stdio: "inherit" });
     objFiles.push(stubsO);
   }
 
-  // Step 5: Link all object files together
-  linkMultipleObjects(objFiles, options.runtimePath, options.outputFile);
+  // Link all object files together
+  linkMultipleObjects(objFiles, options.runtimePath, options.outputFile, extraLibs);
 
   // Clean up .o files
   if (!options.emitLL) {

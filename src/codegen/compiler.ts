@@ -25,8 +25,10 @@ export class CompilerContext {
   private funcInfos: Map<number, HirFunction>;
   private loopStack: Array<[string, string]>;  // [breakLabel, continueLabel]
   public globalPrefix: string;  // prefix for global variable names (module isolation)
+  public funcPrefix: string;  // prefix for function names (module isolation in multi-file)
   private importedGlobalNames: Set<string>;  // full global names that are imported (no prefix needed)
   public asyncPromisePtr: string | null;  // alloca ptr for async function's promise (null if not async)
+  private trampolines: Map<string, string>;  // funcName -> trampoline funcName
 
   constructor(mod: LLModule) {
     this.mod = mod;
@@ -36,8 +38,10 @@ export class CompilerContext {
     this.funcInfos = new Map();
     this.loopStack = [];
     this.globalPrefix = "";
+    this.funcPrefix = "";
     this.importedGlobalNames = new Set();
     this.asyncPromisePtr = null;
+    this.trampolines = new Map();
   }
 
   getGlobalName(name: string): string {
@@ -82,6 +86,10 @@ export class CompilerContext {
   registerFunc(id: number, name: string, info: HirFunction): void {
     this.funcNames.set(id, name);
     this.funcInfos.set(id, info);
+  }
+
+  hasFuncName(id: number): boolean {
+    return this.funcNames.has(id);
   }
 
   getFuncName(id: number): string {
@@ -139,6 +147,32 @@ export class CompilerContext {
   registerExternalFunc(id: number, name: string): void {
     this.funcNames.set(id, name);
   }
+
+  // Get or create a trampoline wrapper for a named function so it can be called via js_closure_callN.
+  // Named functions have signature (double, ...) -> double, but closures expect (ptr, double, ...) -> double.
+  // The trampoline ignores the ptr arg and forwards to the real function.
+  getOrCreateTrampoline(funcName: string, paramCount: number): string {
+    const existing = this.trampolines.get(funcName);
+    if (existing !== undefined) return existing;
+
+    const trampolineName = "__trampoline_" + funcName;
+    // Build params: ptr %env (ignored), then double %a0, %a1, ...
+    const params: Array<[string, string]> = [[PTR, "%env"]];
+    for (let i = 0; i < paramCount; i = i + 1) {
+      params.push([DOUBLE, "%a" + i]);
+    }
+    const func = this.mod.defineFunction(trampolineName, DOUBLE, params);
+    const entry = func.createBlock("entry");
+    // Forward call to real function (skip the %env param)
+    const fwdArgs: Array<[string, string]> = [];
+    for (let i = 0; i < paramCount; i = i + 1) {
+      fwdArgs.push([DOUBLE, "%a" + i]);
+    }
+    const result = entry.call(DOUBLE, funcName, fwdArgs);
+    entry.ret(DOUBLE, result);
+    this.trampolines.set(funcName, trampolineName);
+    return trampolineName;
+  }
 }
 
 // Compile a full HIR module to LLVM IR text
@@ -152,6 +186,9 @@ export function compileModule(hirModule: HirModule, moduleName: string | null, d
   // Set global prefix for module isolation
   if (moduleName !== null) {
     ctx.globalPrefix = moduleName + "__";
+    if (!isEntry) {
+      ctx.funcPrefix = moduleName + "__";
+    }
   }
 
   // Declare runtime FFI functions
@@ -165,6 +202,10 @@ export function compileModule(hirModule: HirModule, moduleName: string | null, d
   // Register all functions first (for forward references)
   for (let i = 0; i < hirModule.functions.length; i = i + 1) {
     const func = hirModule.functions[i];
+    // Prefix function name with module name for non-entry modules (avoids duplicate symbols)
+    if (ctx.funcPrefix !== "") {
+      func.name = ctx.funcPrefix + func.name;
+    }
     ctx.registerFunc(func.id, func.name, func);
   }
 
