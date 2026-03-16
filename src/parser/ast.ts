@@ -12,6 +12,7 @@ export const enum TypeNodeKind {
   Tuple = 6,       // [T, U]
   TypeOf = 7,      // typeof x
   Nullable = 8,    // T | null | undefined
+  ObjectLiteral = 9, // { name: string; age: number }
 }
 
 export interface TypeNode {
@@ -45,6 +46,11 @@ export interface GenericTypeNode extends TypeNode {
   typeArgs: Array<TypeNode>;
 }
 
+export interface ObjectLiteralTypeNode extends TypeNode {
+  kind: TypeNodeKind.ObjectLiteral;
+  members: Array<[string, TypeNode]>;  // field name -> type
+}
+
 // --- Expressions ---
 
 export const enum AstExprKind {
@@ -75,6 +81,8 @@ export const enum AstExprKind {
   Super = 24,
   Paren = 25,        // (expr)
   CompoundAssign = 26, // +=, -=, etc.
+  Await = 27,
+  Yield = 28,
 }
 
 export interface AstExpr {
@@ -142,6 +150,7 @@ export interface MemberExprAst extends AstExpr {
   kind: AstExprKind.Member;
   object: AstExpr;
   property: string;
+  optional: boolean;  // true for ?. access
 }
 
 export interface IndexExprAst extends AstExpr {
@@ -175,6 +184,7 @@ export interface ArrowExprAst extends AstExpr {
   params: Array<ParamDecl>;
   returnType: TypeNode | null;
   body: AstExpr | Array<AstStmt>;  // expression or block
+  async: boolean;
 }
 
 export interface ArrayExprAst extends AstExpr {
@@ -192,6 +202,12 @@ export interface ObjectProperty {
   value: AstExpr;
   computed: boolean;
   shorthand: boolean;
+}
+
+export interface TemplateExprAst extends AstExpr {
+  kind: AstExprKind.Template;
+  parts: Array<string>;       // string parts (n+1 items)
+  expressions: Array<AstExpr>; // expression parts (n items)
 }
 
 export interface NewExprAst extends AstExpr {
@@ -227,6 +243,16 @@ export interface SuperExprAst extends AstExpr {
 export interface ParenExprAst extends AstExpr {
   kind: AstExprKind.Paren;
   expr: AstExpr;
+}
+
+export interface AwaitExprAst extends AstExpr {
+  kind: AstExprKind.Await;
+  operand: AstExpr;
+}
+
+export interface YieldExprAst extends AstExpr {
+  kind: AstExprKind.Yield;
+  operand: AstExpr | null;
 }
 
 // --- Statements ---
@@ -280,6 +306,7 @@ export interface ParamDecl {
   typeAnnotation: TypeNode | null;
   defaultValue: AstExpr | null;
   rest: boolean;
+  accessibility: string | null;  // "public" | "private" | "protected" | null
 }
 
 export interface FunctionDeclAst extends AstStmt {
@@ -289,6 +316,8 @@ export interface FunctionDeclAst extends AstStmt {
   returnType: TypeNode | null;
   typeParams: Array<string> | null;
   body: Array<AstStmt>;
+  async: boolean;
+  generator: boolean;
 }
 
 export interface ReturnStmtAst extends AstStmt {
@@ -371,6 +400,7 @@ export interface ClassMemberAst {
   typeAnnotation: TypeNode | null;  // for properties
   body: Array<AstStmt> | null;
   initializer: AstExpr | null;
+  decorator: string | null;
 }
 
 export interface ClassDeclAst extends AstStmt {

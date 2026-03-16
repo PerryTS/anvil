@@ -111,9 +111,24 @@ export class LLModule {
     }
     ir = ir + "\n";
 
-    // External declarations
+    // Build set of defined function names to avoid declare+define conflicts
+    const definedNames: Map<string, boolean> = new Map();
+    for (let i = 0; i < this.functions.length; i = i + 1) {
+      definedNames.set(this.functions[i].name, true);
+    }
+
+    // External declarations (skip if also defined in this module)
     for (let i = 0; i < this.declarations.length; i = i + 1) {
       let decl: string = this.declarations[i];
+      // Extract name from "declare <type> @<name>(...)"
+      const atIdx = decl.indexOf("@");
+      const parenIdx = decl.indexOf("(", atIdx);
+      if (atIdx >= 0 && parenIdx >= 0) {
+        const declName = decl.substring(atIdx + 1, parenIdx);
+        if (definedNames.has(declName)) {
+          continue; // skip — this function is defined below
+        }
+      }
       ir = ir + decl + "\n";
     }
     ir = ir + "\n";

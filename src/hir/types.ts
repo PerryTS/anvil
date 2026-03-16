@@ -42,6 +42,7 @@ export interface ObjectType extends Type {
   fields: Map<string, Type>;
   interfaceName: string;
   isMap: boolean;
+  isSet: boolean;
 }
 
 export const NUMBER_TYPE: Type = { kind: TypeKind.Number };
@@ -67,7 +68,7 @@ export function makeUnionType(members: Array<Type>): UnionType {
 }
 
 export function makeObjectType(fields: Map<string, Type>): ObjectType {
-  return { kind: TypeKind.Object, fields: fields, interfaceName: "", isMap: false };
+  return { kind: TypeKind.Object, fields: fields, interfaceName: "", isMap: false, isSet: false };
 }
 
 export function isDynamic(ty: Type): boolean {

@@ -17,8 +17,8 @@ import {
   IdentifierExpr, BinaryExprAst, UnaryExprAst, UnaryPostfixExprAst,
   CallExprAst, MemberExprAst, IndexExprAst, AssignExprAst, CompoundAssignExprAst,
   ConditionalExprAst, ArrowExprAst, ArrayExprAst, ObjectExprAst, ObjectProperty,
-  NewExprAst, TypeAsExprAst, TypeofExprAst, SpreadExprAst,
-  ThisExprAst, SuperExprAst, ParenExprAst,
+  NewExprAst, TemplateExprAst, TypeAsExprAst, TypeofExprAst, SpreadExprAst,
+  ThisExprAst, SuperExprAst, ParenExprAst, AwaitExprAst, YieldExprAst,
   NamedTypeNode, ArrayTypeNode, FunctionTypeNode, UnionTypeNode, GenericTypeNode,
 } from "./ast";
 
@@ -26,21 +26,27 @@ export class Parser {
   private scanner: Scanner;
   private current: Token;
   private fileName: string;
+  private prevScanPos: number;
+  private prevScanLine: number;
+  private prevScanCol: number;
 
   constructor(source: string, fileName: string) {
     this.scanner = new Scanner(source);
+    this.prevScanPos = this.scanner.getPos();
+    this.prevScanLine = this.scanner.getLine();
+    this.prevScanCol = this.scanner.getCol();
     this.current = this.scanner.scan();
     this.fileName = fileName;
   }
 
   parse(): SourceFile {
-    console.log("[parse] start, current.kind=" + this.current.kind + " EOF=" + TokenKind.EOF);
+    console.error("[parse] start, current.kind=" + this.current.kind + " EOF=" + TokenKind.EOF);
     const stmts: Array<AstStmt> = [];
     while (this.current.kind !== TokenKind.EOF) {
-      console.log("[parse] parseStatement, current.kind=" + this.current.kind + " value=" + this.current.value);
+      console.error("[parse] parseStatement, current.kind=" + this.current.kind + " value=" + this.current.value);
       stmts.push(this.parseStatement());
     }
-    console.log("[parse] done, " + stmts.length + " stmts");
+    console.error("[parse] done, " + stmts.length + " stmts");
     return { statements: stmts, fileName: this.fileName };
   }
 
@@ -48,6 +54,9 @@ export class Parser {
 
   private advance(): Token {
     const prev = this.current;
+    this.prevScanPos = this.scanner.getPos();
+    this.prevScanLine = this.scanner.getLine();
+    this.prevScanCol = this.scanner.getCol();
     this.current = this.scanner.scan();
     return prev;
   }
@@ -88,7 +97,14 @@ export class Parser {
       return this.parseVarDecl();
     }
     if (kind === TokenKind.Function) {
-      return this.parseFunctionDecl();
+      return this.parseFunctionDecl(false);
+    }
+    if (kind === TokenKind.Async) {
+      const next = this.scanner.peek();
+      if (next.kind === TokenKind.Function) {
+        this.advance(); // consume 'async'
+        return this.parseFunctionDecl(true);
+      }
     }
     if (kind === TokenKind.Return) {
       return this.parseReturn();
@@ -158,9 +174,20 @@ export class Parser {
     return this.parseExprStmt();
   }
 
-  private parseVarDecl(): VarDeclAst {
+  private parseVarDecl(): AstStmt {
     const tok = this.advance();
     const declKind = tok.value;
+
+    // Array destructuring: let [a, b, c] = expr
+    if (this.at(TokenKind.LeftBracket)) {
+      return this.parseArrayDestructuring(tok, declKind);
+    }
+
+    // Object destructuring: let { x, y } = expr
+    if (this.at(TokenKind.LeftBrace)) {
+      return this.parseObjectDestructuring(tok, declKind);
+    }
+
     const name = this.expect(TokenKind.Identifier).value;
 
     let typeAnnotation: TypeNode | null = null;
@@ -177,11 +204,214 @@ export class Parser {
     return {
       kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
       declKind: declKind, name: name, typeAnnotation: typeAnnotation, init: init,
-    };
+    } as VarDeclAst;
   }
 
-  private parseFunctionDecl(): FunctionDeclAst {
+  private parseArrayDestructuring(tok: Token, declKind: string): AstStmt {
+    this.expect(TokenKind.LeftBracket);
+    const names: Array<string> = [];
+    let restName: string | null = null;
+    let restIndex = -1;
+    while (!this.at(TokenKind.RightBracket) && !this.at(TokenKind.EOF)) {
+      if (this.at(TokenKind.Comma)) {
+        // Skip element (hole in destructuring)
+        names.push("");
+        this.advance();
+        continue;
+      }
+      if (this.eat(TokenKind.DotDotDot)) {
+        restName = this.expect(TokenKind.Identifier).value;
+        restIndex = names.length;
+        if (!this.at(TokenKind.RightBracket)) {
+          this.eat(TokenKind.Comma);
+        }
+        break;
+      }
+      names.push(this.expect(TokenKind.Identifier).value);
+      if (!this.at(TokenKind.RightBracket)) {
+        this.expect(TokenKind.Comma);
+      }
+    }
+    this.expect(TokenKind.RightBracket);
+
+    // Skip optional type annotation
+    if (this.eat(TokenKind.Colon)) {
+      this.parseTypeAnnotation();
+    }
+
+    this.expect(TokenKind.Equal);
+    const init = this.parseExpression();
+    this.eat(TokenKind.Semicolon);
+
+    // Desugar: let __tmp = init; let a = __tmp[0]; let b = __tmp[1]; ...
+    const tmpName = "__destr_" + tok.line + "_" + tok.col;
+    const stmts: Array<AstStmt> = [];
+    stmts.push({
+      kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
+      declKind: declKind, name: tmpName, typeAnnotation: null, init: init,
+    } as VarDeclAst);
+
+    for (let i = 0; i < names.length; i = i + 1) {
+      if (names[i] === "") continue; // skip holes
+      const indexExpr: AstExpr = {
+        kind: AstExprKind.Index, line: tok.line, col: tok.col,
+        object: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpName } as IdentifierExpr,
+        index: { kind: AstExprKind.Number, line: tok.line, col: tok.col, value: i, raw: "" + i } as NumberLitExpr,
+      } as IndexExprAst;
+      stmts.push({
+        kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
+        declKind: declKind, name: names[i], typeAnnotation: null, init: indexExpr,
+      } as VarDeclAst);
+    }
+
+    // Rest pattern: let rest = __tmp.slice(N)
+    if (restName !== null) {
+      const sliceExpr: AstExpr = {
+        kind: AstExprKind.Call, line: tok.line, col: tok.col,
+        callee: {
+          kind: AstExprKind.Member, line: tok.line, col: tok.col,
+          object: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpName } as IdentifierExpr,
+          property: "slice", optional: false,
+        } as MemberExprAst,
+        args: [{ kind: AstExprKind.Number, line: tok.line, col: tok.col, value: restIndex, raw: "" + restIndex } as NumberLitExpr],
+        typeArgs: null,
+      } as CallExprAst;
+      stmts.push({
+        kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
+        declKind: declKind, name: restName, typeAnnotation: null, init: sliceExpr,
+      } as VarDeclAst);
+    }
+
+    return { kind: AstStmtKind.Block, line: tok.line, col: tok.col, body: stmts } as BlockStmtAst;
+  }
+
+  private parseObjectDestructuring(tok: Token, declKind: string): AstStmt {
+    this.expect(TokenKind.LeftBrace);
+    const bindings: Array<{ key: string; local: string; defaultVal: AstExpr | null; rest: boolean }> = [];
+    while (!this.at(TokenKind.RightBrace) && !this.at(TokenKind.EOF)) {
+      // Rest pattern: ...rest
+      if (this.at(TokenKind.DotDotDot)) {
+        this.advance();
+        const restName = this.expect(TokenKind.Identifier).value;
+        bindings.push({ key: restName, local: restName, defaultVal: null, rest: true });
+        if (!this.at(TokenKind.RightBrace)) {
+          this.eat(TokenKind.Comma);
+        }
+        continue;
+      }
+      const key = this.expect(TokenKind.Identifier).value;
+      let local = key;
+      if (this.eat(TokenKind.Colon)) {
+        // Rename: { x: a }
+        local = this.expect(TokenKind.Identifier).value;
+      }
+      let defaultVal: AstExpr | null = null;
+      if (this.eat(TokenKind.Equal)) {
+        defaultVal = this.parseExpression();
+      }
+      bindings.push({ key: key, local: local, defaultVal: defaultVal, rest: false });
+      if (!this.at(TokenKind.RightBrace)) {
+        this.expect(TokenKind.Comma);
+      }
+    }
+    this.expect(TokenKind.RightBrace);
+
+    // Skip type assertion (e.g., "as any")
+    if (this.at(TokenKind.Colon)) {
+      this.advance();
+      this.parseTypeAnnotation();
+    }
+
+    this.expect(TokenKind.Equal);
+    const init = this.parseExpression();
+    // Handle "as any" after the init expression
+    this.eat(TokenKind.Semicolon);
+
+    // Desugar: let __tmp = init; let x = __tmp.x; let y = __tmp.y; ...
+    const tmpName = "__destr_" + tok.line + "_" + tok.col;
+    const stmts: Array<AstStmt> = [];
+    stmts.push({
+      kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
+      declKind: declKind, name: tmpName, typeAnnotation: null, init: init,
+    } as VarDeclAst);
+
+    // Collect non-rest keys for the rest pattern
+    const nonRestKeys: Array<string> = [];
+    for (let i = 0; i < bindings.length; i = i + 1) {
+      if (!bindings[i].rest) {
+        nonRestKeys.push(bindings[i].key);
+      }
+    }
+
+    for (let i = 0; i < bindings.length; i = i + 1) {
+      const binding = bindings[i];
+      if (binding.rest) {
+        // Rest pattern: restObj = $object_rest(__tmp, [excluded_keys...])
+        // Build array literal of excluded key strings
+        const excludeElements: Array<AstExpr> = [];
+        for (let k = 0; k < nonRestKeys.length; k = k + 1) {
+          excludeElements.push({
+            kind: AstExprKind.String, line: tok.line, col: tok.col,
+            value: nonRestKeys[k],
+          } as StringLitExpr);
+        }
+        const excludeArray: AstExpr = {
+          kind: AstExprKind.Array, line: tok.line, col: tok.col,
+          elements: excludeElements,
+        } as ArrayExprAst;
+        // $object_rest(src, excludeKeys)
+        const restExpr: AstExpr = {
+          kind: AstExprKind.Call, line: tok.line, col: tok.col,
+          callee: {
+            kind: AstExprKind.Identifier, line: tok.line, col: tok.col,
+            name: "$object_rest",
+          } as IdentifierExpr,
+          args: [
+            { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpName } as IdentifierExpr,
+            excludeArray,
+          ],
+          typeArgs: null,
+        } as CallExprAst;
+        stmts.push({
+          kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
+          declKind: declKind, name: binding.local, typeAnnotation: null, init: restExpr,
+        } as VarDeclAst);
+        continue;
+      }
+      let accessExpr: AstExpr = {
+        kind: AstExprKind.Member, line: tok.line, col: tok.col,
+        object: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpName } as IdentifierExpr,
+        property: binding.key, optional: false,
+      } as MemberExprAst;
+      if (binding.defaultVal !== null) {
+        // x = __tmp.x !== undefined ? __tmp.x : defaultVal
+        accessExpr = {
+          kind: AstExprKind.Conditional, line: tok.line, col: tok.col,
+          condition: {
+            kind: AstExprKind.Binary, line: tok.line, col: tok.col,
+            op: "!==", left: accessExpr,
+            right: { kind: AstExprKind.Undefined, line: tok.line, col: tok.col } as UndefinedLitExpr,
+          } as BinaryExprAst,
+          consequent: {
+            kind: AstExprKind.Member, line: tok.line, col: tok.col,
+            object: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpName } as IdentifierExpr,
+            property: binding.key, optional: false,
+          } as MemberExprAst,
+          alternate: binding.defaultVal,
+        } as ConditionalExprAst;
+      }
+      stmts.push({
+        kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col,
+        declKind: declKind, name: binding.local, typeAnnotation: null, init: accessExpr,
+      } as VarDeclAst);
+    }
+
+    return { kind: AstStmtKind.Block, line: tok.line, col: tok.col, body: stmts } as BlockStmtAst;
+  }
+
+  private parseFunctionDecl(isAsync: boolean): FunctionDeclAst {
     const tok = this.expect(TokenKind.Function);
+    const isGenerator = this.eat(TokenKind.Star);
     const name = this.expect(TokenKind.Identifier).value;
 
     let typeParams: Array<string> | null = null;
@@ -198,10 +428,20 @@ export class Parser {
       returnType = this.parseTypeAnnotation();
     }
 
+    // Function overload declaration (no body, ends with ;)
+    if (this.eat(TokenKind.Semicolon)) {
+      return {
+        kind: AstStmtKind.FunctionDecl, line: tok.line, col: tok.col,
+        name: name, params: params, returnType: returnType, typeParams: typeParams, body: [],
+        async: isAsync, generator: isGenerator,
+      };
+    }
+
     const body = this.parseBlockBody();
     return {
       kind: AstStmtKind.FunctionDecl, line: tok.line, col: tok.col,
       name: name, params: params, returnType: returnType, typeParams: typeParams, body: body,
+      async: isAsync, generator: isGenerator,
     };
   }
 
@@ -214,15 +454,29 @@ export class Parser {
       }
 
       // Handle accessibility modifiers in constructor params
-      if (this.at(TokenKind.Public) || this.at(TokenKind.Private) || this.at(TokenKind.Protected) || this.at(TokenKind.Readonly)) {
-        this.advance();
+      let paramAccess: string | null = null;
+      if (this.at(TokenKind.Public) || this.at(TokenKind.Private) || this.at(TokenKind.Protected)) {
+        paramAccess = this.advance().value;
         // May have multiple modifiers
         if (this.at(TokenKind.Readonly)) {
           this.advance();
         }
+      } else if (this.at(TokenKind.Readonly)) {
+        this.advance();
       }
 
-      const name = this.expect(TokenKind.Identifier).value;
+      // Handle 'this' parameter (TypeScript explicit this typing)
+      let name: string;
+      if (this.at(TokenKind.This)) {
+        name = this.advance().value;
+        // 'this' parameters are just type annotations, skip them
+        if (this.eat(TokenKind.Colon)) {
+          this.parseTypeAnnotation();
+        }
+        if (!this.eat(TokenKind.Comma)) break;
+        continue;
+      }
+      name = this.expect(TokenKind.Identifier).value;
       let optional = false;
       if (this.eat(TokenKind.Question)) {
         optional = true;
@@ -238,7 +492,7 @@ export class Parser {
         defaultValue = this.parseAssignmentExpr();
       }
 
-      params.push({ name: name, typeAnnotation: typeAnnotation, defaultValue: defaultValue, rest: rest });
+      params.push({ name: name, typeAnnotation: typeAnnotation, defaultValue: defaultValue, rest: rest, accessibility: paramAccess });
 
       if (!this.eat(TokenKind.Comma)) {
         break;
@@ -296,20 +550,58 @@ export class Parser {
     const tok = this.expect(TokenKind.For);
     this.expect(TokenKind.LeftParen);
 
-    // Check for for..in / for..of (we need basic for..in support at least)
-    let init: AstStmt | null = null;
+    // Check for for..in / for..of: for (let/const/var x in/of expr)
     if (this.at(TokenKind.Let) || this.at(TokenKind.Const) || this.at(TokenKind.Var)) {
-      init = this.parseVarDecl();
-      // Note: parseVarDecl consumed the semicolon. But for regular for loops
-      // we need to check if this was actually a for..in/of
-    } else if (!this.at(TokenKind.Semicolon)) {
+      const declTok = this.advance();
+      const declKind = declTok.value;
+
+      // Check if next token after identifier is 'in' or 'of'
+      if (this.at(TokenKind.Identifier)) {
+        const varName = this.advance().value;
+
+        if (this.at(TokenKind.In) || this.at(TokenKind.Of)) {
+          const iterKind = this.advance().value; // "in" or "of"
+          const iterExpr = this.parseExpression();
+          this.expect(TokenKind.RightParen);
+          const body = this.parseStatementOrBlock();
+          return this.desugarForInOf(tok, declKind, varName, iterKind, iterExpr, body);
+        }
+
+        // Regular for loop — continue parsing as VarDecl
+        let typeAnnotation: TypeNode | null = null;
+        if (this.eat(TokenKind.Colon)) {
+          typeAnnotation = this.parseTypeAnnotation();
+        }
+        let varInit: AstExpr | null = null;
+        if (this.eat(TokenKind.Equal)) {
+          varInit = this.parseExpression();
+        }
+        this.eat(TokenKind.Semicolon);
+        const init: AstStmt = {
+          kind: AstStmtKind.VarDecl, line: declTok.line, col: declTok.col,
+          declKind: declKind, name: varName, typeAnnotation: typeAnnotation, init: varInit,
+        } as VarDeclAst;
+        return this.parseForRest(tok, init);
+      } else {
+        // Destructuring in for-loop init — parse as var decl
+        // Put back the let/const/var by rewinding... actually just parse the rest
+        const init = this.parseVarDeclContinuation(declTok, declKind);
+        return this.parseForRest(tok, init);
+      }
+    }
+
+    let init: AstStmt | null = null;
+    if (!this.at(TokenKind.Semicolon)) {
       const expr = this.parseExpression();
       init = { kind: AstStmtKind.Expr, line: expr.line, col: expr.col, expr: expr } as ExprStmtAst;
       this.eat(TokenKind.Semicolon);
     } else {
       this.eat(TokenKind.Semicolon);
     }
+    return this.parseForRest(tok, init);
+  }
 
+  private parseForRest(tok: Token, init: AstStmt | null): ForStmtAst {
     let condition: AstExpr | null = null;
     if (!this.at(TokenKind.Semicolon)) {
       condition = this.parseExpression();
@@ -327,6 +619,114 @@ export class Parser {
       kind: AstStmtKind.For, line: tok.line, col: tok.col,
       init: init, condition: condition, update: update, body: body,
     } as ForStmtAst;
+  }
+
+  private parseVarDeclContinuation(declTok: Token, declKind: string): AstStmt {
+    // Handle case where we've already consumed let/const/var but haven't seen an identifier
+    // This handles destructuring patterns in for-loop inits
+    if (this.at(TokenKind.LeftBracket)) {
+      return this.parseArrayDestructuring(declTok, declKind);
+    }
+    if (this.at(TokenKind.LeftBrace)) {
+      return this.parseObjectDestructuring(declTok, declKind);
+    }
+    const name = this.expect(TokenKind.Identifier).value;
+    let typeAnnotation: TypeNode | null = null;
+    if (this.eat(TokenKind.Colon)) {
+      typeAnnotation = this.parseTypeAnnotation();
+    }
+    let init: AstExpr | null = null;
+    if (this.eat(TokenKind.Equal)) {
+      init = this.parseExpression();
+    }
+    this.eat(TokenKind.Semicolon);
+    return {
+      kind: AstStmtKind.VarDecl, line: declTok.line, col: declTok.col,
+      declKind: declKind, name: name, typeAnnotation: typeAnnotation, init: init,
+    } as VarDeclAst;
+  }
+
+  private desugarForInOf(tok: Token, declKind: string, varName: string, iterKind: string, iterExpr: AstExpr, body: AstStmt): AstStmt {
+    // Desugar for..in/of to a regular for loop
+    const tmpArr = "__forin_" + tok.line + "_" + tok.col;
+    const tmpIdx = "__forin_i_" + tok.line + "_" + tok.col;
+    const tmpLen = "__forin_len_" + tok.line + "_" + tok.col;
+
+    const stmts: Array<AstStmt> = [];
+
+    if (iterKind === "in") {
+      // for (let key in obj) -> let __keys = Object.keys(obj); for (let i=0; i<__keys.length; i++) { let key = __keys[i]; ... }
+      // Emit as: let __keys = $object_keys(obj)
+      const keysCall: AstExpr = {
+        kind: AstExprKind.Call, line: tok.line, col: tok.col,
+        callee: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: "$object_keys" } as IdentifierExpr,
+        args: [iterExpr],
+        typeArgs: null,
+      } as CallExprAst;
+      stmts.push({ kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col, declKind: "let", name: tmpArr, typeAnnotation: null, init: keysCall } as VarDeclAst);
+    } else {
+      // for (let x of arr) -> iterate over array directly
+      stmts.push({ kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col, declKind: "let", name: tmpArr, typeAnnotation: null, init: iterExpr } as VarDeclAst);
+    }
+
+    // let __len = __arr.length
+    const lenExpr: AstExpr = {
+      kind: AstExprKind.Member, line: tok.line, col: tok.col,
+      object: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpArr } as IdentifierExpr,
+      property: "length", optional: false,
+    } as MemberExprAst;
+    stmts.push({ kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col, declKind: "let", name: tmpLen, typeAnnotation: null, init: lenExpr } as VarDeclAst);
+
+    // let __i = 0
+    const zeroExpr: AstExpr = { kind: AstExprKind.Number, line: tok.line, col: tok.col, value: 0, raw: "0" } as NumberLitExpr;
+    const initStmt: AstStmt = { kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col, declKind: "let", name: tmpIdx, typeAnnotation: null, init: zeroExpr } as VarDeclAst;
+
+    // __i < __len
+    const condition: AstExpr = {
+      kind: AstExprKind.Binary, line: tok.line, col: tok.col, op: "<",
+      left: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpIdx } as IdentifierExpr,
+      right: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpLen } as IdentifierExpr,
+    } as BinaryExprAst;
+
+    // __i = __i + 1
+    const update: AstExpr = {
+      kind: AstExprKind.Assign, line: tok.line, col: tok.col,
+      target: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpIdx } as IdentifierExpr,
+      value: {
+        kind: AstExprKind.Binary, line: tok.line, col: tok.col, op: "+",
+        left: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpIdx } as IdentifierExpr,
+        right: { kind: AstExprKind.Number, line: tok.line, col: tok.col, value: 1, raw: "1" } as NumberLitExpr,
+      } as BinaryExprAst,
+    } as AssignExprAst;
+
+    // let varName = __arr[__i]
+    const elemAccess: AstExpr = {
+      kind: AstExprKind.Index, line: tok.line, col: tok.col,
+      object: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpArr } as IdentifierExpr,
+      index: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tmpIdx } as IdentifierExpr,
+    } as IndexExprAst;
+    const elemDecl: AstStmt = { kind: AstStmtKind.VarDecl, line: tok.line, col: tok.col, declKind: declKind, name: varName, typeAnnotation: null, init: elemAccess } as VarDeclAst;
+
+    // Wrap body in block with elem decl prepended
+    let bodyStmts: Array<AstStmt> = [];
+    bodyStmts.push(elemDecl);
+    if (body.kind === AstStmtKind.Block) {
+      const blockBody = (body as BlockStmtAst).body;
+      for (let i = 0; i < blockBody.length; i = i + 1) {
+        bodyStmts.push(blockBody[i]);
+      }
+    } else {
+      bodyStmts.push(body);
+    }
+    const forBody: AstStmt = { kind: AstStmtKind.Block, line: tok.line, col: tok.col, body: bodyStmts } as BlockStmtAst;
+
+    const forStmt: ForStmtAst = {
+      kind: AstStmtKind.For, line: tok.line, col: tok.col,
+      init: initStmt, condition: condition, update: update, body: forBody,
+    } as ForStmtAst;
+    stmts.push(forStmt);
+
+    return { kind: AstStmtKind.Block, line: tok.line, col: tok.col, body: stmts } as BlockStmtAst;
   }
 
   private parseDoWhile(): DoWhileStmtAst {
@@ -473,6 +873,13 @@ export class Parser {
     let accessibility: string | null = null;
     let isReadonly = false;
     let isAbstract = false;
+    let decorator: string | null = null;
+
+    // Parse decorator (@name)
+    if (this.at(TokenKind.At)) {
+      this.advance();
+      decorator = this.expect(TokenKind.Identifier).value;
+    }
 
     // Parse modifiers
     while (true) {
@@ -497,7 +904,7 @@ export class Parser {
       return {
         name: name, kind: "getter", isStatic: isStatic, accessibility: accessibility,
         isReadonly: isReadonly, params: [], returnType: returnType, typeAnnotation: null,
-        body: body, initializer: null,
+        body: body, initializer: null, decorator: decorator,
       };
     }
     if (this.current.value === "set" && this.scanner.peek().kind === TokenKind.Identifier) {
@@ -510,7 +917,7 @@ export class Parser {
       return {
         name: name, kind: "setter", isStatic: isStatic, accessibility: accessibility,
         isReadonly: isReadonly, params: params, returnType: null, typeAnnotation: null,
-        body: body, initializer: null,
+        body: body, initializer: null, decorator: decorator,
       };
     }
 
@@ -524,7 +931,7 @@ export class Parser {
       return {
         name: "constructor", kind: "constructor", isStatic: false, accessibility: null,
         isReadonly: false, params: params, returnType: null, typeAnnotation: null,
-        body: body, initializer: null,
+        body: body, initializer: null, decorator: decorator,
       };
     }
 
@@ -564,7 +971,7 @@ export class Parser {
       return {
         name: name, kind: "method", isStatic: isStatic, accessibility: accessibility,
         isReadonly: isReadonly, params: params, returnType: returnType, typeAnnotation: null,
-        body: body, initializer: null,
+        body: body, initializer: null, decorator: decorator,
       };
     }
 
@@ -581,7 +988,7 @@ export class Parser {
     return {
       name: name, kind: "property", isStatic: isStatic, accessibility: accessibility,
       isReadonly: isReadonly, params: null, returnType: null, typeAnnotation: typeAnnotation,
-      body: null, initializer: initializer,
+      body: null, initializer: initializer, decorator: decorator,
     };
   }
 
@@ -724,8 +1131,11 @@ export class Parser {
       declaration = this.parseStatement();
     } else {
       // export default expr;
-      if (this.at(TokenKind.Function)) {
-        declaration = this.parseFunctionDecl();
+      if (this.at(TokenKind.Async) && this.scanner.peek().kind === TokenKind.Function) {
+        this.advance(); // consume 'async'
+        declaration = this.parseFunctionDecl(true);
+      } else if (this.at(TokenKind.Function)) {
+        declaration = this.parseFunctionDecl(false);
       } else if (this.at(TokenKind.Class)) {
         declaration = this.parseClassDecl();
       } else {
@@ -850,6 +1260,16 @@ export class Parser {
   // --- Type annotations ---
 
   private parseTypeAnnotation(): TypeNode {
+    // Handle leading | for discriminated unions: type X = | A | B
+    if (this.at(TokenKind.Pipe)) {
+      const members: Array<TypeNode> = [];
+      while (this.eat(TokenKind.Pipe)) {
+        members.push(this.parsePrimaryType());
+      }
+      if (members.length === 1) return members[0];
+      return { kind: TypeNodeKind.Union, members: members } as UnionTypeNode;
+    }
+
     let ty = this.parsePrimaryType();
 
     // Union type: T | U
@@ -970,15 +1390,76 @@ export class Parser {
   }
 
   private parseObjectTypeLiteral(): TypeNode {
-    // Minimal: just skip the contents
     this.expect(TokenKind.LeftBrace);
-    let depth = 1;
-    while (depth > 0 && !this.at(TokenKind.EOF)) {
-      if (this.at(TokenKind.LeftBrace)) depth = depth + 1;
-      if (this.at(TokenKind.RightBrace)) depth = depth - 1;
-      if (depth > 0) this.advance();
+    const members: Array<[string, TypeNode]> = [];
+    while (!this.at(TokenKind.RightBrace) && !this.at(TokenKind.EOF)) {
+      // Skip readonly modifier (only if followed by identifier, not colon)
+      if (this.at(TokenKind.Identifier) && this.current.value === "readonly") {
+        // Save scanner state to check next token
+        const savedPos = this.scanner.getPos();
+        const savedLine = this.scanner.getLine();
+        const savedCol = this.scanner.getCol();
+        const savedCurrent = this.current;
+        this.advance();
+        if (this.at(TokenKind.Identifier) || this.at(TokenKind.LeftBracket)) {
+          // "readonly" was a modifier, skip it
+        } else {
+          // "readonly" is actually the field name, restore
+          this.scanner.setPos(savedPos);
+          this.scanner.setLine(savedLine);
+          this.scanner.setCol(savedCol);
+          this.current = savedCurrent;
+        }
+      }
+      if (this.at(TokenKind.LeftBracket)) {
+        // Index signature like [key: string]: Type - skip it
+        let depth = 1;
+        this.advance();
+        while (depth > 0 && !this.at(TokenKind.EOF)) {
+          if (this.at(TokenKind.LeftBracket)) depth = depth + 1;
+          if (this.at(TokenKind.RightBracket)) depth = depth - 1;
+          if (depth > 0) this.advance();
+        }
+        this.expect(TokenKind.RightBracket);
+        if (this.eat(TokenKind.Colon)) {
+          this.parseTypeAnnotation();
+        }
+      } else if (this.at(TokenKind.Identifier) || this.at(TokenKind.StringLiteral)) {
+        const name = this.advance().value;
+        const optional = this.eat(TokenKind.Question);
+        if (this.at(TokenKind.LeftParen) || this.at(TokenKind.LessThan)) {
+          // Method signature: name(params): RetType - skip
+          if (this.at(TokenKind.LessThan)) {
+            this.parseTypeArguments();
+          }
+          this.expect(TokenKind.LeftParen);
+          let pDepth = 1;
+          while (pDepth > 0 && !this.at(TokenKind.EOF)) {
+            if (this.at(TokenKind.LeftParen)) pDepth = pDepth + 1;
+            if (this.at(TokenKind.RightParen)) pDepth = pDepth - 1;
+            if (pDepth > 0) this.advance();
+          }
+          this.expect(TokenKind.RightParen);
+          if (this.eat(TokenKind.Colon)) {
+            this.parseTypeAnnotation();
+          }
+          members.push([name, { kind: TypeNodeKind.Named, name: "any" } as NamedTypeNode]);
+        } else if (this.eat(TokenKind.Colon)) {
+          const ty = this.parseTypeAnnotation();
+          members.push([name, ty]);
+        } else {
+          members.push([name, { kind: TypeNodeKind.Named, name: "any" } as NamedTypeNode]);
+        }
+      } else {
+        this.advance(); // skip unknown tokens
+      }
+      this.eat(TokenKind.Semicolon);
+      this.eat(TokenKind.Comma);
     }
     this.expect(TokenKind.RightBrace);
+    if (members.length > 0) {
+      return { kind: TypeNodeKind.ObjectLiteral, members: members } as any;
+    }
     return { kind: TypeNodeKind.Named, name: "object" } as NamedTypeNode;
   }
 
@@ -1052,7 +1533,9 @@ export class Parser {
     if (this.at(TokenKind.PlusEqual) || this.at(TokenKind.MinusEqual) ||
         this.at(TokenKind.StarEqual) || this.at(TokenKind.SlashEqual) ||
         this.at(TokenKind.PercentEqual) || this.at(TokenKind.AmpersandEqual) ||
-        this.at(TokenKind.PipeEqual) || this.at(TokenKind.CaretEqual)) {
+        this.at(TokenKind.PipeEqual) || this.at(TokenKind.CaretEqual) ||
+        this.at(TokenKind.LessLessEqual) || this.at(TokenKind.GreaterGreaterEqual) ||
+        this.at(TokenKind.GreaterGreaterGreaterEqual) || this.at(TokenKind.QuestionQuestionEqual)) {
       const op = this.advance().value;
       const right = this.parseAssignmentExpr();
       return { kind: AstExprKind.CompoundAssign, line: left.line, col: left.col, op: op, target: left, value: right } as CompoundAssignExprAst;
@@ -1077,7 +1560,7 @@ export class Parser {
 
   private parseLogicalOr(): AstExpr {
     let left = this.parseLogicalAnd();
-    while (this.at(TokenKind.PipePipe)) {
+    while (this.at(TokenKind.PipePipe) || this.at(TokenKind.QuestionQuestion)) {
       const op = this.advance().value;
       const right = this.parseLogicalAnd();
       left = { kind: AstExprKind.Binary, line: left.line, col: left.col, op: op, left: left, right: right } as BinaryExprAst;
@@ -1230,12 +1713,49 @@ export class Parser {
       return { kind: AstExprKind.Spread, line: tok.line, col: tok.col, argument: argument } as SpreadExprAst;
     }
     if (this.at(TokenKind.New)) {
-      return this.parseNew();
+      let newExpr: AstExpr = this.parseNew();
+      // Allow chaining member access / calls after new: new Foo(5).bar()
+      while (this.at(TokenKind.Dot) || this.at(TokenKind.LeftBracket) || this.at(TokenKind.LeftParen)) {
+        if (this.at(TokenKind.Dot)) {
+          this.advance();
+          const prop = this.advance().value;
+          newExpr = { kind: AstExprKind.Member, line: newExpr.line, col: newExpr.col, object: newExpr, property: prop, optional: false } as MemberExprAst;
+        } else if (this.at(TokenKind.LeftBracket)) {
+          this.advance();
+          const idx = this.parseExpression();
+          this.expect(TokenKind.RightBracket);
+          newExpr = { kind: AstExprKind.Index, line: newExpr.line, col: newExpr.col, object: newExpr, index: idx } as IndexExprAst;
+        } else if (this.at(TokenKind.LeftParen)) {
+          this.advance();
+          const callArgs: Array<AstExpr> = [];
+          while (!this.at(TokenKind.RightParen) && !this.at(TokenKind.EOF)) {
+            callArgs.push(this.parseAssignmentExpr());
+            if (!this.eat(TokenKind.Comma)) break;
+          }
+          this.expect(TokenKind.RightParen);
+          newExpr = { kind: AstExprKind.Call, line: newExpr.line, col: newExpr.col, callee: newExpr, args: callArgs, typeArgs: null } as CallExprAst;
+        }
+      }
+      return newExpr;
     }
     if (this.at(TokenKind.Delete)) {
       const tok = this.advance();
       const operand = this.parseUnary();
       return { kind: AstExprKind.Unary, line: tok.line, col: tok.col, op: "delete", operand: operand } as UnaryExprAst;
+    }
+    if (this.at(TokenKind.Await)) {
+      const tok = this.advance();
+      const operand = this.parseUnary();
+      return { kind: AstExprKind.Await, line: tok.line, col: tok.col, operand: operand } as AwaitExprAst;
+    }
+    if (this.at(TokenKind.Yield)) {
+      const tok = this.advance();
+      let operand: AstExpr | null = null;
+      // yield has an optional operand; check if there's an expression following
+      if (!this.at(TokenKind.Semicolon) && !this.at(TokenKind.RightBrace) && !this.at(TokenKind.RightParen) && !this.at(TokenKind.Comma) && !this.at(TokenKind.EOF)) {
+        operand = this.parseAssignmentExpr();
+      }
+      return { kind: AstExprKind.Yield, line: tok.line, col: tok.col, operand: operand } as YieldExprAst;
     }
     return this.parsePostfix();
   }
@@ -1248,7 +1768,7 @@ export class Parser {
     while (this.at(TokenKind.Dot)) {
       this.advance();
       const prop = this.advance().value;
-      callee = { kind: AstExprKind.Member, line: callee.line, col: callee.col, object: callee, property: prop } as MemberExprAst;
+      callee = { kind: AstExprKind.Member, line: callee.line, col: callee.col, object: callee, property: prop, optional: false } as MemberExprAst;
     }
 
     // Skip type args
@@ -1294,10 +1814,19 @@ export class Parser {
     let expr = this.parsePrimary();
 
     while (true) {
-      if (this.at(TokenKind.Dot)) {
+      if (this.at(TokenKind.Dot) || this.at(TokenKind.QuestionDot)) {
+        const isOptional = this.at(TokenKind.QuestionDot);
         this.advance();
-        const prop = this.advance().value;
-        expr = { kind: AstExprKind.Member, line: expr.line, col: expr.col, object: expr, property: prop } as MemberExprAst;
+        // ?.[expr] — optional index access
+        if (isOptional && this.at(TokenKind.LeftBracket)) {
+          this.advance();
+          const index = this.parseExpression();
+          this.expect(TokenKind.RightBracket);
+          expr = { kind: AstExprKind.Index, line: expr.line, col: expr.col, object: expr, index: index } as IndexExprAst;
+        } else {
+          const prop = this.advance().value;
+          expr = { kind: AstExprKind.Member, line: expr.line, col: expr.col, object: expr, property: prop, optional: isOptional } as MemberExprAst;
+        }
       } else if (this.at(TokenKind.LeftBracket)) {
         this.advance();
         const index = this.parseExpression();
@@ -1361,6 +1890,10 @@ export class Parser {
       return { kind: AstExprKind.String, line: tok.line, col: tok.col, value: tok.value } as StringLitExpr;
     }
 
+    if (tok.kind === TokenKind.TemplateHead) {
+      return this.parseTemplateExpression();
+    }
+
     if (tok.kind === TokenKind.True) {
       this.advance();
       return { kind: AstExprKind.Bool, line: tok.line, col: tok.col, value: true } as BoolLitExpr;
@@ -1397,13 +1930,13 @@ export class Parser {
       // Check for arrow function: ident => expr
       if (this.at(TokenKind.Arrow)) {
         this.advance();
-        const param: ParamDecl = { name: tok.value, typeAnnotation: null, defaultValue: null, rest: false };
+        const param: ParamDecl = { name: tok.value, typeAnnotation: null, defaultValue: null, rest: false, accessibility: null };
         if (this.at(TokenKind.LeftBrace)) {
           const body = this.parseBlockBody();
-          return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: [param], returnType: null, body: body } as ArrowExprAst;
+          return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: [param], returnType: null, body: body, async: false } as ArrowExprAst;
         }
         const bodyExpr = this.parseAssignmentExpr();
-        return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: [param], returnType: null, body: bodyExpr } as ArrowExprAst;
+        return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: [param], returnType: null, body: bodyExpr, async: false } as ArrowExprAst;
       }
 
       return { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: tok.value } as IdentifierExpr;
@@ -1421,14 +1954,67 @@ export class Parser {
       return this.parseObjectLiteral();
     }
 
+    if (tok.kind === TokenKind.Async) {
+      // async function expr
+      if (this.scanner.peek().kind === TokenKind.Function) {
+        this.advance(); // consume 'async'
+        return this.parseFunctionExpr(true);
+      }
+      // async (...) => ... or async x => ...
+      if (this.scanner.peek().kind === TokenKind.LeftParen) {
+        this.advance(); // consume 'async'
+        return this.parseParenOrArrow(true);
+      }
+      if (this.scanner.peek().kind === TokenKind.Identifier) {
+        this.advance(); // consume 'async'
+        const idTok = this.advance();
+        // Must be followed by =>
+        if (this.at(TokenKind.Arrow)) {
+          this.advance();
+          const param: ParamDecl = { name: idTok.value, typeAnnotation: null, defaultValue: null, rest: false, accessibility: null };
+          if (this.at(TokenKind.LeftBrace)) {
+            const body = this.parseBlockBody();
+            return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: [param], returnType: null, body: body, async: true } as ArrowExprAst;
+          }
+          const bodyExpr = this.parseAssignmentExpr();
+          return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: [param], returnType: null, body: bodyExpr, async: true } as ArrowExprAst;
+        }
+      }
+      // Fall through: treat 'async' as identifier
+      this.advance();
+      return { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: "async" } as IdentifierExpr;
+    }
+
     if (tok.kind === TokenKind.Function) {
-      return this.parseFunctionExpr();
+      return this.parseFunctionExpr(false);
+    }
+
+    // Regex literal: / at start of expression
+    if (tok.kind === TokenKind.Slash) {
+      // prevScanPos is the scanner state BEFORE `this.current` was scanned.
+      // Restore scanner to that state and rescan as regex.
+      this.scanner.setPos(this.prevScanPos);
+      this.scanner.setLine(this.prevScanLine);
+      this.scanner.setCol(this.prevScanCol);
+      const regexTok = this.scanner.scanRegex();
+      this.current = this.scanner.scan();
+      const nulIdx = regexTok.value.indexOf("\0");
+      const pattern = nulIdx >= 0 ? regexTok.value.substring(0, nulIdx) : regexTok.value;
+      const flags = nulIdx >= 0 ? regexTok.value.substring(nulIdx + 1) : "";
+      return {
+        kind: AstExprKind.New, line: tok.line, col: tok.col,
+        callee: { kind: AstExprKind.Identifier, line: tok.line, col: tok.col, name: "$regex" } as IdentifierExpr,
+        args: [
+          { kind: AstExprKind.String, line: tok.line, col: tok.col, value: pattern } as StringLitExpr,
+          { kind: AstExprKind.String, line: tok.line, col: tok.col, value: flags } as StringLitExpr,
+        ],
+      } as NewExprAst;
     }
 
     throw this.error("Unexpected token: " + tokenKindName(tok.kind) + " '" + tok.value + "'");
   }
 
-  private parseParenOrArrow(): AstExpr {
+  private parseParenOrArrow(isAsync: boolean = false): AstExpr {
     const tok = this.current;
     // Heuristic: check if this looks like arrow function params
     // Arrow: () =>, (id) =>, (id: type) =>, (id, ...) =>
@@ -1448,10 +2034,10 @@ export class Parser {
         this.advance();
         if (this.at(TokenKind.LeftBrace)) {
           const body = this.parseBlockBody();
-          return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: body } as ArrowExprAst;
+          return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: body, async: isAsync } as ArrowExprAst;
         }
         const bodyExpr = this.parseAssignmentExpr();
-        return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: bodyExpr } as ArrowExprAst;
+        return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: bodyExpr, async: isAsync } as ArrowExprAst;
       }
     }
 
@@ -1471,6 +2057,28 @@ export class Parser {
     }
     this.expect(TokenKind.RightBracket);
     return { kind: AstExprKind.Array, line: tok.line, col: tok.col, elements: elements };
+  }
+
+  private parseTemplateExpression(): TemplateExprAst {
+    const tok = this.advance(); // consume TemplateHead
+    const parts: Array<string> = [tok.value];
+    const expressions: Array<AstExpr> = [];
+    // Parse expression after TemplateHead
+    expressions.push(this.parseExpression());
+    // Parse TemplateMiddle* TemplateTail
+    while (this.at(TokenKind.TemplateMiddle)) {
+      const mid = this.advance();
+      parts.push(mid.value);
+      expressions.push(this.parseExpression());
+    }
+    // Expect TemplateTail
+    if (this.at(TokenKind.TemplateTail)) {
+      const tail = this.advance();
+      parts.push(tail.value);
+    } else {
+      parts.push("");
+    }
+    return { kind: AstExprKind.Template, line: tok.line, col: tok.col, parts: parts, expressions: expressions };
   }
 
   private parseObjectLiteral(): ObjectExprAst {
@@ -1515,7 +2123,7 @@ export class Parser {
         const body = this.parseBlockBody();
         const arrowExpr: ArrowExprAst = {
           kind: AstExprKind.Arrow, line: tok.line, col: tok.col,
-          params: params, returnType: returnType, body: body,
+          params: params, returnType: returnType, body: body, async: false,
         };
         properties.push({ key: key, value: arrowExpr, computed: false, shorthand: false });
         this.eat(TokenKind.Comma);
@@ -1536,8 +2144,10 @@ export class Parser {
     return { kind: AstExprKind.Object, line: tok.line, col: tok.col, properties: properties };
   }
 
-  private parseFunctionExpr(): ArrowExprAst {
+  private parseFunctionExpr(isAsync: boolean): ArrowExprAst {
     const tok = this.expect(TokenKind.Function);
+    // Skip * for generator expressions (handled at transform level)
+    this.eat(TokenKind.Star);
     // Optional function name
     if (this.at(TokenKind.Identifier)) {
       this.advance();
@@ -1553,7 +2163,7 @@ export class Parser {
       returnType = this.parseTypeAnnotation();
     }
     const body = this.parseBlockBody();
-    return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: body };
+    return { kind: AstExprKind.Arrow, line: tok.line, col: tok.col, params: params, returnType: returnType, body: body, async: isAsync };
   }
 
   // Check if current < starts type arguments by scanning ahead to find matching >

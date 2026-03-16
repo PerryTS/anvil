@@ -11,7 +11,7 @@ const DOUBLE: string = "double";
 const I64: string = "i64";
 const I32: string = "i32";
 const I1: string = "i1";
-import { i64Literal, doubleLiteral, TAG_UNDEFINED_I64, TAG_TRUE_I64 } from "./nanbox";
+import { i64Literal, doubleLiteral, TAG_UNDEFINED_I64, TAG_TRUE_I64, TAG_FALSE_I64 } from "./nanbox";
 const TAG_UNDEFINED = 0x7FFC_0000_0000_0001n;
 const TAG_TRUE = 0x7FFC_0000_0000_0004n;
 import { CompilerContext } from "./compiler";
@@ -98,7 +98,22 @@ function compileLet(ctx: CompilerContext, block: LLBlock, stmt: LetStmt): LLBloc
 }
 
 function compileReturn(ctx: CompilerContext, block: LLBlock, stmt: ReturnStmt): LLBlock {
-  if (stmt.value !== null) {
+  if (ctx.asyncPromisePtr !== null) {
+    // Async function: resolve promise with return value, then return NaN-boxed promise
+    let retVal: string;
+    if (stmt.value !== null) {
+      const result = compileExpr(ctx, block, stmt.value);
+      block = result[0];
+      retVal = result[1];
+    } else {
+      retVal = block.bitcastI64ToDouble(TAG_UNDEFINED_I64);
+    }
+    const promise = block.load(PTR, ctx.asyncPromisePtr);
+    block.callVoid("js_promise_resolve", [[PTR, promise], [DOUBLE, retVal]]);
+    const promiseI64 = block.ptrtoint(promise, I64);
+    const promiseBoxed = block.call(DOUBLE, "js_nanbox_pointer", [[I64, promiseI64]]);
+    block.ret(DOUBLE, promiseBoxed);
+  } else if (stmt.value !== null) {
     const result = compileExpr(ctx, block, stmt.value);
     block = result[0];
     block.ret(DOUBLE, result[1]);
@@ -114,11 +129,6 @@ function compileCondition(ctx: CompilerContext, block: LLBlock, condExpr: Expr):
   block = result[0];
   const condVal = result[1];
 
-  if (isBoolean(condExpr.ty)) {
-    const condI64 = block.bitcastDoubleToI64(condVal);
-    const cond = block.icmpEq(I64, condI64, TAG_TRUE_I64);
-    return [block, cond];
-  }
   if (isNumber(condExpr.ty)) {
     const cond = block.fcmp("one", condVal, "0.0");
     return [block, cond];

@@ -265,6 +265,46 @@ double pd_path_relative(double base_val, double target_val) {
     return str_box(result);
 }
 
+// pd_path_extname(path) -> nanboxed string (file extension)
+double pd_path_extname(double path_val) {
+    char path[PATH_MAX];
+    str_extract(path_val, path, PATH_MAX);
+
+    // Find last '.' after last '/'
+    const char* last_dot = NULL;
+    const char* last_sep = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/') { last_sep = p + 1; last_dot = NULL; }
+        if (*p == '.') last_dot = p;
+    }
+    if (last_dot != NULL && last_dot > last_sep && last_dot != last_sep) {
+        return str_box(last_dot);
+    }
+    return str_box("");
+}
+
+// pd_path_normalize(path) -> nanboxed string (simplified)
+double pd_path_normalize(double path_val) {
+    // For now, just return the path as-is
+    return path_val;
+}
+
+// pd_path_is_absolute(path) -> nanboxed bool
+double pd_path_is_absolute(double path_val) {
+    char path[PATH_MAX];
+    str_extract(path_val, path, PATH_MAX);
+    if (path[0] == '/') {
+        uint64_t tag = 0x7FFC000000000004ULL; // TAG_TRUE
+        double result;
+        memcpy(&result, &tag, 8);
+        return result;
+    }
+    uint64_t tag = 0x7FFC000000000003ULL; // TAG_FALSE
+    double result;
+    memcpy(&result, &tag, 8);
+    return result;
+}
+
 // ============================================================
 // Filesystem operations
 // ============================================================
@@ -318,15 +358,15 @@ double pd_fs_write_file_sync(double path_val, double data_val) {
     return i64_to_f64(TAG_UNDEFINED);
 }
 
-// pd_fs_exists_sync(path) -> nanboxed boolean
+// pd_fs_exists_sync(path) -> numeric 1.0/0.0 (Perry returns numeric booleans)
 double pd_fs_exists_sync(double path_val) {
     char filepath[PATH_MAX];
     str_extract(path_val, filepath, PATH_MAX);
 
     if (access(filepath, F_OK) == 0) {
-        return i64_to_f64(TAG_TRUE);
+        return 1.0;
     }
-    return i64_to_f64(TAG_FALSE);
+    return 0.0;
 }
 
 // pd_fs_unlink_sync(path) -> undefined
@@ -384,9 +424,8 @@ double pd_add_dynamic(double a, double b) {
         return js_nanbox_string(result);
     }
 
-    // Numeric addition
-    extern double js_add(double a, double b);
-    return js_add(a, b);
+    // Numeric addition - just add directly (both are plain f64 numbers)
+    return a + b;
 }
 
 // ============================================================

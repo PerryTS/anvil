@@ -79,6 +79,34 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_object_get_field_f64", DOUBLE, [PTR, I32]);
   // js_object_set_field_f64(obj: *mut ObjectHeader, field_index: u32, value: f64)
   mod.declareFunction("js_object_set_field_f64", VOID, [PTR, I32, DOUBLE]);
+  // js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader (string keys)
+  mod.declareFunction("js_object_keys", PTR, [PTR]);
+  // js_object_rest(src: *const ObjectHeader, exclude_keys: *const ArrayHeader) -> *mut ObjectHeader
+  mod.declareFunction("js_object_rest", PTR, [PTR, PTR]);
+  // js_object_get_field_by_name_f64(obj: *ObjectHeader, key: *StringHeader) -> f64
+  mod.declareFunction("js_object_get_field_by_name_f64", DOUBLE, [PTR, PTR]);
+  // js_object_set_field_by_name(obj: *ObjectHeader, key: *StringHeader, value: f64)
+  mod.declareFunction("js_object_set_field_by_name", VOID, [PTR, PTR, DOUBLE]);
+  // js_object_clone_with_extra(src_f64: f64, extra_count: i32, keys_ptr: ptr, keys_len: i32) -> *mut ObjectHeader
+  mod.declareFunction("js_object_clone_with_extra", PTR, [DOUBLE, I32, PTR, I32]);
+  // js_object_values(obj: *const ObjectHeader) -> *mut ArrayHeader
+  mod.declareFunction("js_object_values", PTR, [PTR]);
+  // js_object_entries(obj: *const ObjectHeader) -> *mut ArrayHeader
+  mod.declareFunction("js_object_entries", PTR, [PTR]);
+  // js_regexp_new(pattern: *const StringHeader, flags: *const StringHeader) -> *mut RegExpHeader
+  mod.declareFunction("js_regexp_new", PTR, [I64, I64]);
+  // js_regexp_test(re: *RegExpHeader, s: *StringHeader) -> i32
+  mod.declareFunction("js_regexp_test", I32, [PTR, PTR]);
+  // js_string_replace_regex(s: *StringHeader, re: *RegExpHeader, replacement: *StringHeader) -> *StringHeader
+  mod.declareFunction("js_string_replace_regex", PTR, [PTR, PTR, PTR]);
+  // js_string_match(s: *StringHeader, re: *RegExpHeader) -> *ArrayHeader
+  mod.declareFunction("js_string_match", PTR, [PTR, PTR]);
+  // js_object_delete_field(obj: *mut ObjectHeader, key: *StringHeader) -> i32
+  mod.declareFunction("js_object_delete_field", I32, [PTR, PTR]);
+  // js_object_has_property(obj: f64, key: f64) -> f64  (1.0 or 0.0)
+  mod.declareFunction("js_object_has_property", DOUBLE, [DOUBLE, DOUBLE]);
+  // js_object_set_keys(obj: *mut ObjectHeader, keys: *mut ArrayHeader) -> void
+  mod.declareFunction("js_object_set_keys", VOID, [PTR, PTR]);
 
   // --- Array ---
   // js_array_alloc(capacity: u32) -> *mut ArrayHeader
@@ -95,8 +123,10 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_array_pop_f64", DOUBLE, [PTR]);
   // js_array_shift_f64(arr: *mut ArrayHeader) -> f64
   mod.declareFunction("js_array_shift_f64", DOUBLE, [PTR]);
-  // js_array_splice(arr: *mut ArrayHeader, start: i32, delete_count: i32) -> *mut ArrayHeader
-  mod.declareFunction("js_array_splice", PTR, [PTR, I32, I32]);
+  // js_array_unshift_f64(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader
+  mod.declareFunction("js_array_unshift_f64", PTR, [PTR, DOUBLE]);
+  // js_array_splice(arr, start, delete_count, items, items_count, out_arr) -> *mut ArrayHeader
+  mod.declareFunction("js_array_splice", PTR, [PTR, I32, I32, PTR, I32, PTR]);
   // js_array_slice(arr: *const ArrayHeader, start: i32, end: i32) -> *mut ArrayHeader
   mod.declareFunction("js_array_slice", PTR, [PTR, I32, I32]);
   // js_array_indexOf_f64(arr: *const ArrayHeader, value: f64) -> i32
@@ -107,6 +137,24 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_array_join", PTR, [PTR, PTR]);
   // js_array_concat(arr1, arr2) -> *mut ArrayHeader
   mod.declareFunction("js_array_concat", PTR, [PTR, PTR]);
+  // js_array_forEach(arr, callback) -> void
+  mod.declareFunction("js_array_forEach", VOID, [PTR, PTR]);
+  // js_array_map(arr, callback) -> *mut ArrayHeader
+  mod.declareFunction("js_array_map", PTR, [PTR, PTR]);
+  // js_array_filter(arr, callback) -> *mut ArrayHeader
+  mod.declareFunction("js_array_filter", PTR, [PTR, PTR]);
+  // js_array_find(arr, callback) -> f64
+  mod.declareFunction("js_array_find", DOUBLE, [PTR, PTR]);
+  // js_array_findIndex(arr, callback) -> i32
+  mod.declareFunction("js_array_findIndex", I32, [PTR, PTR]);
+  // js_array_reduce(arr, callback, has_initial, initial) -> f64
+  mod.declareFunction("js_array_reduce", DOUBLE, [PTR, PTR, I32, DOUBLE]);
+  // js_array_sort_with_comparator(arr, comparator) -> *mut ArrayHeader
+  mod.declareFunction("js_array_sort_with_comparator", PTR, [PTR, PTR]);
+  // js_array_every(arr, callback) -> i32
+  mod.declareFunction("js_array_every", I32, [PTR, PTR]);
+  // js_array_some(arr, callback) -> i32
+  mod.declareFunction("js_array_some", I32, [PTR, PTR]);
 
   // --- Closure ---
   // js_closure_alloc(func_ptr: *const u8, capture_count: u32) -> *mut ClosureHeader
@@ -136,11 +184,23 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   mod.declareFunction("js_map_delete", I32, [PTR, DOUBLE]);
   // js_map_size(map: *const MapHeader) -> u32
   mod.declareFunction("js_map_size", I32, [PTR]);
+  // js_map_clear(map: *mut MapHeader)
+  mod.declareFunction("js_map_clear", VOID, [PTR]);
+
+  // --- Set ---
+  mod.declareFunction("js_set_alloc", PTR, [I32]);
+  mod.declareFunction("js_set_add", PTR, [PTR, DOUBLE]);
+  mod.declareFunction("js_set_has", I32, [PTR, DOUBLE]);
+  mod.declareFunction("js_set_delete", I32, [PTR, DOUBLE]);
+  mod.declareFunction("js_set_size", I32, [PTR]);
+  mod.declareFunction("js_set_clear", VOID, [PTR]);
 
   // --- Process ---
   mod.declareFunction("js_process_exit", VOID, [I32]);
   mod.declareFunction("js_process_get_argv", DOUBLE, []);
   mod.declareFunction("js_process_cwd", DOUBLE, []);
+  // js_getenv(name: *const StringHeader) -> *mut StringHeader (null if not found)
+  mod.declareFunction("js_getenv", PTR, [PTR]);
 
   // --- Math (only declare those that exist in the runtime) ---
   mod.declareFunction("js_math_pow", DOUBLE, [DOUBLE, DOUBLE]);
@@ -152,11 +212,25 @@ export function declareRuntimeFunctions(mod: LLModule): void {
   // Use LLVM intrinsics for floor, ceil, round, abs, sqrt
   mod.declareFunction("llvm.floor.f64", DOUBLE, [DOUBLE]);
   mod.declareFunction("llvm.ceil.f64", DOUBLE, [DOUBLE]);
-  mod.declareFunction("llvm.round.f64", DOUBLE, [DOUBLE]);
+  mod.declareFunction("llvm.roundeven.f64", DOUBLE, [DOUBLE]);
   mod.declareFunction("llvm.fabs.f64", DOUBLE, [DOUBLE]);
   mod.declareFunction("llvm.sqrt.f64", DOUBLE, [DOUBLE]);
   mod.declareFunction("llvm.minnum.f64", DOUBLE, [DOUBLE, DOUBLE]);
   mod.declareFunction("llvm.maxnum.f64", DOUBLE, [DOUBLE, DOUBLE]);
+
+  // --- Date ---
+  mod.declareFunction("js_date_now", DOUBLE, []);
+  mod.declareFunction("js_date_new", DOUBLE, []);
+  mod.declareFunction("js_date_new_from_timestamp", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_time", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_full_year", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_month", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_date", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_hours", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_minutes", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_seconds", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_get_milliseconds", DOUBLE, [DOUBLE]);
+  mod.declareFunction("js_date_to_iso_string", PTR, [DOUBLE]);
 
   // --- Error/exceptions ---
   mod.declareFunction("js_throw", VOID, [DOUBLE]);
@@ -170,6 +244,28 @@ export function declareRuntimeFunctions(mod: LLModule): void {
 
   // --- Dispatch init ---
   mod.declareFunction("js_stdlib_init_dispatch", VOID, []);
+
+  // --- JSON ---
+  mod.declareFunction("js_json_stringify", PTR, [DOUBLE, I32]);
+  mod.declareFunction("js_json_parse", I64, [PTR]);
+
+  // --- Promise ---
+  // js_promise_new() -> *mut PromiseHeader
+  mod.declareFunction("js_promise_new", PTR, []);
+  // js_promise_resolve(promise: *mut PromiseHeader, value: f64)
+  mod.declareFunction("js_promise_resolve", VOID, [PTR, DOUBLE]);
+  // js_promise_reject(promise: *mut PromiseHeader, reason: f64)
+  mod.declareFunction("js_promise_reject", VOID, [PTR, DOUBLE]);
+  // js_promise_then(promise: *mut PromiseHeader, on_fulfilled: *ClosureHeader, on_rejected: *ClosureHeader) -> *mut PromiseHeader
+  mod.declareFunction("js_promise_then", PTR, [PTR, PTR, PTR]);
+  // js_promise_run_microtasks()
+  mod.declareFunction("js_promise_run_microtasks", VOID, []);
+  // js_promise_state(promise: *mut PromiseHeader) -> i32 (0=pending, 1=fulfilled, 2=rejected)
+  mod.declareFunction("js_promise_state", I32, [PTR]);
+  // js_promise_value(promise: *mut PromiseHeader) -> f64
+  mod.declareFunction("js_promise_value", DOUBLE, [PTR]);
+  // js_await_any_promise(value: f64) -> f64  (blocks until resolved)
+  mod.declareFunction("js_await_any_promise", DOUBLE, [DOUBLE]);
 
   // --- Stubs (from stubs.c) ---
   mod.declareFunction("pd_add_dynamic", DOUBLE, [DOUBLE, DOUBLE]);

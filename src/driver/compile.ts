@@ -7,6 +7,7 @@ import { compileModule } from "../codegen/compiler";
 import { linkAll, getDefaultRuntimePath, compileLLToObject, linkMultipleObjects } from "./linker";
 import { Parser } from "../parser/parser";
 import { Lowerer } from "../hir/lower";
+import { transformGenerators } from "../parser/generator_transform";
 
 export interface CompileOptions {
   inputFile: string;
@@ -17,19 +18,22 @@ export interface CompileOptions {
 
 export function compile(options: CompileOptions): void {
   // Step 1: Parse
-  console.log("[anvil] Parsing " + options.inputFile + "...");
+  console.error("[anvil] Parsing " + options.inputFile + "...");
   const source = fs.readFileSync(options.inputFile, "utf-8");
   const parser = new Parser(source, path.basename(options.inputFile));
   const ast = parser.parse();
 
-  // Step 1.5: Resolve imported enums
+  // Step 1.5: Transform generators
+  transformGenerators(ast);
+
+  // Step 1.6: Resolve imported enums
   const sourceDir = path.dirname(path.resolve(options.inputFile));
   const lowerer = new Lowerer();
   lowerer.setSourceDir(sourceDir);
   resolveImportedTypes(ast, sourceDir, lowerer);
 
   // Step 2: Lower AST -> HIR
-  console.log("[anvil] Lowering to HIR...");
+  console.error("[anvil] Lowering to HIR...");
   const hirModule = lowerer.lower(ast);
 
   // Step 3: Codegen + link
@@ -277,13 +281,13 @@ function resolveImportedGlobals(ast: any, sourceDir: string, baseDir: string, lo
 // Compile from a pre-built HIR module (used in Phase 0-1 before parser exists)
 export function compileFromHIR(hirModule: HirModule, options: CompileOptions): void {
   // Step 1: Generate LLVM IR
-  console.log("[anvil] Generating LLVM IR...");
+  console.error("[anvil] Generating LLVM IR...");
   const llvmIR = compileModule(hirModule, null, null, true);
 
   // Step 2: Write .ll file
   const llFile = options.outputFile + ".ll";
   fs.writeFileSync(llFile, llvmIR);
-  console.log("[anvil] Wrote " + llFile);
+  console.error("[anvil] Wrote " + llFile);
 
   // Step 3: Compile and link
   linkAll({
@@ -302,7 +306,7 @@ export function compileFromHIR(hirModule: HirModule, options: CompileOptions): v
     }
   }
 
-  console.log("[anvil] Built " + options.outputFile);
+  console.error("[anvil] Built " + options.outputFile);
 }
 
 // Convert a file path to a module name (e.g., "src/hir/types.ts" -> "hir_types")
@@ -327,26 +331,26 @@ function fileToModuleName(filePath: string, baseDir: string): string {
 
 // Get imports from a single file
 function getFileImports(filePath: string): Array<string> {
-  console.log("[getFileImports] checking " + filePath);
+  console.error("[getFileImports] checking " + filePath);
   const imports: Array<string> = [];
   if (!fs.existsSync(filePath)) {
-    console.log("[getFileImports] file not found");
+    console.error("[getFileImports] file not found");
     return imports;
   }
-  console.log("[getFileImports] reading file...");
+  console.error("[getFileImports] reading file...");
   const source = fs.readFileSync(filePath, "utf-8");
-  console.log("[getFileImports] source length=" + source.length);
-  console.log("[getFileImports] creating parser...");
+  console.error("[getFileImports] source length=" + source.length);
+  console.error("[getFileImports] creating parser...");
   const p = new Parser(source, path.basename(filePath));
-  console.log("[getFileImports] parsing...");
+  console.error("[getFileImports] parsing...");
   let ast: any = null;
   try {
     ast = p.parse();
   } catch (e) {
-    console.log("[getFileImports] parse error");
+    console.error("[getFileImports] parse error");
     return imports;
   }
-  console.log("[getFileImports] parse done");
+  console.error("[getFileImports] parse done");
 
   const dir = path.dirname(filePath);
   for (let i = 0; i < ast.statements.length; i = i + 1) {
@@ -427,9 +431,9 @@ export function compileMultiFile(options: CompileOptions): void {
   const baseDir = path.dirname(entryFile);
 
   // Step 1: Discover all modules in dependency order
-  console.log("[anvil] Discovering modules...");
+  console.error("[anvil] Discovering modules...");
   const modules = discoverModules(entryFile);
-  console.log("[anvil] Found " + modules.length + " module(s)");
+  console.error("[anvil] Found " + modules.length + " module(s)");
 
   if (modules.length <= 1) {
     // Single file, use the simple path
@@ -509,12 +513,15 @@ export function compileMultiFile(options: CompileOptions): void {
     const modName = moduleNames[i];
     const isEntry = (filePath === entryFile);
 
-    console.log("[anvil] Compiling " + modName + (isEntry ? " (entry)" : "") + "...");
+    console.error("[anvil] Compiling " + modName + (isEntry ? " (entry)" : "") + "...");
 
     // Parse
     const source = fs.readFileSync(filePath, "utf-8");
     const parser = new Parser(source, path.basename(filePath));
     const ast = parser.parse();
+
+    // Transform generators
+    transformGenerators(ast);
 
     // Resolve imported enums and globals
     const sourceDir = path.dirname(filePath);
@@ -578,5 +585,5 @@ export function compileMultiFile(options: CompileOptions): void {
     }
   }
 
-  console.log("[anvil] Built " + options.outputFile);
+  console.error("[anvil] Built " + options.outputFile);
 }

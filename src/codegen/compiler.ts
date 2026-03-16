@@ -26,6 +26,7 @@ export class CompilerContext {
   private loopStack: Array<[string, string]>;  // [breakLabel, continueLabel]
   public globalPrefix: string;  // prefix for global variable names (module isolation)
   private importedGlobalNames: Set<string>;  // full global names that are imported (no prefix needed)
+  public asyncPromisePtr: string | null;  // alloca ptr for async function's promise (null if not async)
 
   constructor(mod: LLModule) {
     this.mod = mod;
@@ -36,6 +37,7 @@ export class CompilerContext {
     this.loopStack = [];
     this.globalPrefix = "";
     this.importedGlobalNames = new Set();
+    this.asyncPromisePtr = null;
   }
 
   getGlobalName(name: string): string {
@@ -64,7 +66,7 @@ export class CompilerContext {
   getLocal(id: number): string {
     const ptr = this.locals.get(id);
     if (ptr === undefined) {
-      throw new Error("Unknown local: " + id);
+      throw new Error("Unknown local: " + id + " in function " + (this.currentFunc !== null ? this.currentFunc.name : "?") + " (known: " + Array.from(this.locals.keys()).join(",") + ")");
     }
     return ptr;
   }
@@ -226,6 +228,17 @@ function compileFunction(ctx: CompilerContext, mod: LLModule, hirFunc: HirFuncti
 
   const entry: LLBlock = func.createBlock("entry");
 
+  // For async functions, allocate a promise and store its pointer
+  let asyncPromisePtr: string | null = null;
+  if (hirFunc.isAsync) {
+    const promise = entry.call(PTR, "js_promise_new", []);
+    asyncPromisePtr = entry.alloca(PTR);
+    entry.store(PTR, promise, asyncPromisePtr);
+    ctx.asyncPromisePtr = asyncPromisePtr;
+  } else {
+    ctx.asyncPromisePtr = null;
+  }
+
   // Allocate and store params into local slots
   for (let i = 0; i < hirFunc.params.length; i = i + 1) {
     const param = hirFunc.params[i];
@@ -253,8 +266,18 @@ function compileFunction(ctx: CompilerContext, mod: LLModule, hirFunc: HirFuncti
 
   // Add implicit return undefined if not terminated
   if (!currentBlock.isTerminated()) {
-    const undef = currentBlock.bitcastI64ToDouble(TAG_UNDEFINED_I64);
-    currentBlock.ret(DOUBLE, undef);
+    if (hirFunc.isAsync && asyncPromisePtr !== null) {
+      // Resolve promise with undefined and return the NaN-boxed promise
+      const promise = currentBlock.load(PTR, asyncPromisePtr);
+      const undef = currentBlock.bitcastI64ToDouble(TAG_UNDEFINED_I64);
+      currentBlock.callVoid("js_promise_resolve", [[PTR, promise], [DOUBLE, undef]]);
+      const promiseI64 = currentBlock.ptrtoint(promise, I64);
+      const promiseBoxed = currentBlock.call(DOUBLE, "js_nanbox_pointer", [[I64, promiseI64]]);
+      currentBlock.ret(DOUBLE, promiseBoxed);
+    } else {
+      const undef = currentBlock.bitcastI64ToDouble(TAG_UNDEFINED_I64);
+      currentBlock.ret(DOUBLE, undef);
+    }
   }
 }
 

@@ -5,6 +5,9 @@ export const enum TokenKind {
   NumberLiteral = 0,
   StringLiteral = 1,
   TemplateLiteral = 2,
+  TemplateHead = 3,      // `string part ${
+  TemplateMiddle = 4,    // } string part ${
+  TemplateTail = 5,      // } string part `
 
   // Identifiers and keywords
   Identifier = 10,
@@ -57,6 +60,9 @@ export const enum TokenKind {
   Of = 57,
   Instanceof = 58,
   Delete = 59,
+  Async = 60,
+  Await = 61,
+  Yield = 62,
 
   // Operators
   Plus = 100,
@@ -96,6 +102,12 @@ export const enum TokenKind {
   CaretEqual = 134,
   Arrow = 135,      // =>
   Question = 136,
+  QuestionQuestion = 143,  // ??
+  QuestionDot = 144,       // ?.
+  QuestionQuestionEqual = 145, // ??=
+  LessLessEqual = 140,
+  GreaterGreaterEqual = 141,
+  GreaterGreaterGreaterEqual = 142,
   Colon = 137,
   Dot = 138,
   DotDotDot = 139,
@@ -109,6 +121,8 @@ export const enum TokenKind {
   RightBrace = 205,
   Semicolon = 206,
   Comma = 207,
+
+  At = 208,       // @
 
   // Special
   EOF = 300,
@@ -172,6 +186,9 @@ KEYWORDS.set("in", TokenKind.In);
 KEYWORDS.set("of", TokenKind.Of);
 KEYWORDS.set("instanceof", TokenKind.Instanceof);
 KEYWORDS.set("delete", TokenKind.Delete);
+KEYWORDS.set("async", TokenKind.Async);
+KEYWORDS.set("await", TokenKind.Await);
+KEYWORDS.set("yield", TokenKind.Yield);
 
 export function lookupKeyword(name: string): number | undefined {
   return KEYWORDS.get(name);

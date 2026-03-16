@@ -30,7 +30,7 @@ export interface LinkOptions {
 // Compile .ll to .o via clang
 export function compileLLToObject(llFile: string, objFile: string): void {
   const cmd = "clang -c " + quote(llFile) + " -o " + quote(objFile);
-  console.log("[anvil] " + cmd);
+  console.error("[anvil] " + cmd);
   execSync(cmd, { stdio: "inherit" });
 }
 
@@ -50,7 +50,7 @@ export function linkExecutable(objFile: string, runtimePath: string, outputPath:
     stubsArg = " " + quote(stubsO);
   }
   const cmd = "cc " + quote(objFile) + stubsArg + " " + quote(runtimePath) + " -lSystem -lresolv -liconv -o " + quote(outputPath);
-  console.log("[anvil] " + cmd);
+  console.error("[anvil] " + cmd);
   execSync(cmd, { stdio: "inherit" });
   // Clean up stubs .o
   if (stubsArg !== "") {
@@ -68,7 +68,7 @@ export function linkMultipleObjects(objFiles: Array<string>, runtimePath: string
     cmd = cmd + " " + quote(objFiles[i]);
   }
   cmd = cmd + " " + quote(runtimePath) + " -lSystem -lresolv -liconv -o " + quote(outputPath);
-  console.log("[anvil] Linking " + objFiles.length + " object files...");
+  console.error("[anvil] Linking " + objFiles.length + " object files...");
   execSync(cmd, { stdio: "inherit" });
 }
 

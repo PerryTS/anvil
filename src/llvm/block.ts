@@ -48,6 +48,15 @@ export class LLBlock {
     return "%r" + n;
   }
 
+  // Public versions for advanced codegen
+  nextReg(): string {
+    return this.reg();
+  }
+
+  emitRaw(line: string): void {
+    this.emit(line);
+  }
+
   // --- Arithmetic (double) ---
 
   fadd(a: string, b: string): string {
@@ -165,6 +174,12 @@ export class LLBlock {
   sitofp(fromTy: LLVMType, val: string, toTy: LLVMType): string {
     const r = this.reg();
     this.emit(r + " = sitofp " + fromTy + " " + val + " to " + toTy);
+    return r;
+  }
+
+  uitofp(fromTy: LLVMType, val: string, toTy: LLVMType): string {
+    const r = this.reg();
+    this.emit(r + " = uitofp " + fromTy + " " + val + " to " + toTy);
     return r;
   }
 

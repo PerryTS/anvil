@@ -320,6 +320,7 @@ function buildFunctionTest(): HirModule {
       } as ReturnStmt,
     ],
     localCount: 2,
+    isAsync: false,
   };
 
   const doubleFunc: HirFunction = {
@@ -340,6 +341,7 @@ function buildFunctionTest(): HirModule {
       } as ReturnStmt,
     ],
     localCount: 1,
+    isAsync: false,
   };
 
   const stmts: Array<Stmt> = [];

@@ -11,6 +11,7 @@ export class Scanner {
   private tokenStart: number;
   private tokenLine: number;
   private tokenCol: number;
+  private templateDepth: number;
 
   constructor(source: string) {
     this.source = source;
@@ -20,6 +21,7 @@ export class Scanner {
     this.tokenStart = 0;
     this.tokenLine = 1;
     this.tokenCol = 1;
+    this.templateDepth = 0;
   }
 
   getPos(): number { return this.pos; }
@@ -28,6 +30,54 @@ export class Scanner {
   setLine(v: number): void { this.line = v; }
   getCol(): number { return this.col; }
   setCol(v: number): void { this.col = v; }
+
+  // Scan a regex literal: /pattern/flags
+  // Called by the parser when it knows a / should be a regex (not division)
+  scanRegex(): Token {
+    this.skipWhitespaceAndComments();
+    this.tokenStart = this.pos;
+    this.tokenLine = this.line;
+    this.tokenCol = this.col;
+    if (this.pos >= this.source.length || this.source.charCodeAt(this.pos) !== 47) {
+      return this.makeToken(TokenKind.Slash, "/");
+    }
+    this.advance(); // consume opening /
+    let pattern = "";
+    let inCharClass = false;
+    while (this.pos < this.source.length) {
+      const c = this.source.charCodeAt(this.pos);
+      if (c === 92) { // backslash escape
+        pattern = pattern + this.source.charAt(this.pos);
+        this.advance();
+        if (this.pos < this.source.length) {
+          pattern = pattern + this.source.charAt(this.pos);
+          this.advance();
+        }
+        continue;
+      }
+      if (c === 91) { inCharClass = true; } // [
+      if (c === 93) { inCharClass = false; } // ]
+      if (c === 47 && !inCharClass) { // closing /
+        this.advance(); // consume closing /
+        break;
+      }
+      pattern = pattern + this.source.charAt(this.pos);
+      this.advance();
+    }
+    // Scan flags (g, i, m, s, u, y)
+    let flags = "";
+    while (this.pos < this.source.length) {
+      const fc = this.source.charCodeAt(this.pos);
+      if ((fc >= 97 && fc <= 122) || (fc >= 65 && fc <= 90)) { // a-z, A-Z
+        flags = flags + this.source.charAt(this.pos);
+        this.advance();
+      } else {
+        break;
+      }
+    }
+    // Return as string literal with special format: pattern + "\0" + flags
+    return { kind: TokenKind.StringLiteral, value: pattern + "\0" + flags, line: this.tokenLine, col: this.tokenCol };
+  }
 
   scan(): Token {
     this.skipWhitespaceAndComments();
@@ -47,6 +97,17 @@ export class Scanner {
       return this.scanNumber();
     }
 
+    // Private fields: #name
+    if (ch === 35) { // #
+      // Check if next char is an identifier start
+      if (this.pos + 1 < this.source.length && isIdentStart(this.source.charCodeAt(this.pos + 1))) {
+        this.advance(); // consume #
+        const ident = this.scanIdentifier();
+        // Prepend # to the identifier value — treat as regular identifier
+        return { kind: TokenKind.Identifier, value: "#" + ident.value, line: ident.line, col: ident.col - 1 };
+      }
+    }
+
     // Identifiers and keywords
     if (isIdentStart(ch)) {
       return this.scanIdentifier();
@@ -60,6 +121,11 @@ export class Scanner {
     // Template literals
     if (ch === 96) { // `
       return this.scanTemplateLiteral();
+    }
+
+    // Template continuation: when we see } while inside a template expression
+    if (ch === 125 && this.templateDepth > 0) { // }
+      return this.scanTemplateContinuation();
     }
 
     // Operators and delimiters
@@ -257,10 +323,11 @@ export class Scanner {
         else if (esc === 116) { value = value + "\t"; }
         else { value = value + String.fromCharCode(esc); }
       } else if (this.current() === 36 && this.lookAhead(1) === 123) { // ${
-        // Template expression - for now, just include raw text
-        value = value + "${";
-        this.advance();
-        this.advance();
+        // Template expression found - return TemplateHead
+        this.advance(); // skip $
+        this.advance(); // skip {
+        this.templateDepth = this.templateDepth + 1;
+        return this.makeToken(TokenKind.TemplateHead, value);
       } else {
         value = value + String.fromCharCode(this.current());
         this.advance();
@@ -269,7 +336,36 @@ export class Scanner {
     if (this.pos < this.source.length) {
       this.advance(); // closing backtick
     }
+    // No expressions found - simple template literal
     return this.makeToken(TokenKind.TemplateLiteral, value);
+  }
+
+  private scanTemplateContinuation(): Token {
+    this.advance(); // skip closing }
+    let value = "";
+    while (this.pos < this.source.length && this.current() !== 96) {
+      if (this.current() === 92) { // backslash
+        this.advance();
+        const esc = this.current();
+        this.advance();
+        if (esc === 110) { value = value + "\n"; }
+        else if (esc === 116) { value = value + "\t"; }
+        else { value = value + String.fromCharCode(esc); }
+      } else if (this.current() === 36 && this.lookAhead(1) === 123) { // ${
+        // Another template expression - return TemplateMiddle
+        this.advance(); // skip $
+        this.advance(); // skip {
+        return this.makeToken(TokenKind.TemplateMiddle, value);
+      } else {
+        value = value + String.fromCharCode(this.current());
+        this.advance();
+      }
+    }
+    if (this.pos < this.source.length) {
+      this.advance(); // closing backtick
+    }
+    this.templateDepth = this.templateDepth - 1;
+    return this.makeToken(TokenKind.TemplateTail, value);
   }
 
   private scanOperator(): Token {
@@ -284,8 +380,23 @@ export class Scanner {
     if (ch === 125) return this.makeToken(TokenKind.RightBrace, "}");
     if (ch === 59) return this.makeToken(TokenKind.Semicolon, ";");
     if (ch === 44) return this.makeToken(TokenKind.Comma, ",");
+    if (ch === 64) return this.makeToken(TokenKind.At, "@");  // @
     if (ch === 126) return this.makeToken(TokenKind.Tilde, "~");
-    if (ch === 63) return this.makeToken(TokenKind.Question, "?");
+    if (ch === 63) { // ?
+      if (this.pos < this.source.length && this.current() === 63) {
+        this.advance(); // consume second ?
+        if (this.pos < this.source.length && this.current() === 61) { // ??=
+          this.advance();
+          return this.makeToken(TokenKind.QuestionQuestionEqual, "??=");
+        }
+        return this.makeToken(TokenKind.QuestionQuestion, "??");
+      }
+      if (this.pos < this.source.length && this.current() === 46) { // ?.
+        this.advance(); // consume .
+        return this.makeToken(TokenKind.QuestionDot, "?.");
+      }
+      return this.makeToken(TokenKind.Question, "?");
+    }
     if (ch === 58) return this.makeToken(TokenKind.Colon, ":");
 
     // Dot / ...
@@ -356,18 +467,27 @@ export class Scanner {
       return this.makeToken(TokenKind.Exclaim, "!");
     }
 
-    // < << <=
+    // < << <<= <=
     if (ch === 60) {
-      if (this.current() === 60) { this.advance(); return this.makeToken(TokenKind.LessLess, "<<"); }
+      if (this.current() === 60) {
+        this.advance();
+        if (this.current() === 61) { this.advance(); return this.makeToken(TokenKind.LessLessEqual, "<<="); }
+        return this.makeToken(TokenKind.LessLess, "<<");
+      }
       if (this.current() === 61) { this.advance(); return this.makeToken(TokenKind.LessEqual, "<="); }
       return this.makeToken(TokenKind.LessThan, "<");
     }
 
-    // > >> >>> >=
+    // > >> >>= >>> >>>= >=
     if (ch === 62) {
       if (this.current() === 62) {
         this.advance();
-        if (this.current() === 62) { this.advance(); return this.makeToken(TokenKind.GreaterGreaterGreater, ">>>"); }
+        if (this.current() === 62) {
+          this.advance();
+          if (this.current() === 61) { this.advance(); return this.makeToken(TokenKind.GreaterGreaterGreaterEqual, ">>>="); }
+          return this.makeToken(TokenKind.GreaterGreaterGreater, ">>>");
+        }
+        if (this.current() === 61) { this.advance(); return this.makeToken(TokenKind.GreaterGreaterEqual, ">>="); }
         return this.makeToken(TokenKind.GreaterGreater, ">>");
       }
       if (this.current() === 61) { this.advance(); return this.makeToken(TokenKind.GreaterEqual, ">="); }

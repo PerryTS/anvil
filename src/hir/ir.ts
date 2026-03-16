@@ -36,6 +36,7 @@ export const enum ExprKind {
   Int32 = 28,
   GlobalGet = 29,
   GlobalSet = 30,
+  Await = 31,
 }
 
 export interface Expr {
@@ -121,6 +122,7 @@ export interface CompareExpr extends Expr {
 export const enum LogicalOp {
   And = 0,
   Or = 1,
+  NullishCoalesce = 2,
 }
 
 export interface LogicalExpr extends Expr {
@@ -260,6 +262,11 @@ export interface GlobalSetExpr extends Expr {
   value: Expr;
 }
 
+export interface AwaitExpr extends Expr {
+  kind: ExprKind.Await;
+  inner: Expr;
+}
+
 // --- Statements ---
 
 export const enum StmtKind {
@@ -351,6 +358,7 @@ export interface HirFunction {
   returnType: Type;
   body: Array<Stmt>;
   localCount: number;
+  isAsync: boolean;
 }
 
 export interface HirModule {
