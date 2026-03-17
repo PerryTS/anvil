@@ -123,6 +123,11 @@ export class Lowerer {
   private pendingThisLayout: Map<string, number> | null;
   // Module-level boxed vars: 'var' declarations that need boxing for closure capture at top level
   private moduleBoxedVars: Map<string, boolean>;
+  // Interface -> implementing class names (for interface method dispatch)
+  private interfaceImplementors: Map<string, Array<string>>;
+  // Class name -> unique class ID (1-indexed; 0 = anonymous/unknown)
+  private classIdMap: Map<string, number>;
+  private nextClassId: number;
 
   constructor() {
     this.nextLocalId = 0;
@@ -153,6 +158,9 @@ export class Lowerer {
     this.objMethodFields = new Map();
     this.pendingThisLayout = null;
     this.moduleBoxedVars = new Map();
+    this.interfaceImplementors = new Map();
+    this.classIdMap = new Map();
+    this.nextClassId = 1;
   }
 
   setSourceDir(dir: string): void {
@@ -1907,6 +1915,22 @@ export class Lowerer {
           }
         }
 
+        // Interface method dispatch for identifier receivers (e.g., globalProcessor.process(4))
+        // When the variable's type is an interface (not a concrete class), use dynamic dispatch
+        if (varClassName === null) {
+          const localType0 = this.lookupLocalType(obj.name);
+          const ifaceName0 = this.getInterfaceName(localType0);
+          if (ifaceName0 !== null && this.interfaceImplementors.has(ifaceName0)) {
+            const objExprI = this.lowerExpr(member.object);
+            const argsI: Array<Expr> = [];
+            for (let i = 0; i < expr.args.length; i = i + 1) {
+              argsI.push(this.lowerExpr(expr.args[i]));
+            }
+            const dispatch = this.generateInterfaceDispatch(objExprI, ifaceName0, member.property, argsI);
+            if (dispatch !== null) return dispatch;
+          }
+        }
+
         // Method calls on known typed locals (arrays, maps)
         const localType = this.lookupLocalType(obj.name);
         if (this.isArrayMethod(member.property) && (localType.kind === TypeKind.Array || localType.kind === TypeKind.Any)) {
@@ -2063,6 +2087,20 @@ export class Lowerer {
               args: args,
             } as CallExpr;
           }
+        }
+      }
+
+      // Interface method dispatch for member expression receivers (e.g., this._processor.process(value))
+      // When the field's type is an interface, use dynamic dispatch based on class_id
+      if (objClassName === null || this.lookupClassInfo(objClassName) === null) {
+        const objTypeName = this.resolveExprTypeName(member.object);
+        if (objTypeName !== null && this.interfaceImplementors.has(objTypeName)) {
+          const argsM: Array<Expr> = [];
+          for (let i = 0; i < expr.args.length; i = i + 1) {
+            argsM.push(this.lowerExpr(expr.args[i]));
+          }
+          const dispatch = this.generateInterfaceDispatch(objExpr, objTypeName, member.property, argsM);
+          if (dispatch !== null) return dispatch;
         }
       }
 
@@ -3167,6 +3205,25 @@ export class Lowerer {
     this.scope.functions.set(ctorName, ctorId);
     this.scope.funcReturnTypes.set(ctorName, ANY_TYPE);
 
+    // Assign a unique class ID
+    if (!this.classIdMap.has(decl.name)) {
+      this.classIdMap.set(decl.name, this.nextClassId);
+      this.nextClassId = this.nextClassId + 1;
+    }
+
+    // Record interface implementations
+    if (decl.implementsInterfaces !== null) {
+      for (let ii = 0; ii < decl.implementsInterfaces.length; ii = ii + 1) {
+        const ifaceName = decl.implementsInterfaces[ii];
+        let impls = this.interfaceImplementors.get(ifaceName);
+        if (impls === undefined) {
+          impls = [];
+          this.interfaceImplementors.set(ifaceName, impls);
+        }
+        impls.push(decl.name);
+      }
+    }
+
     for (let i = 0; i < decl.members.length; i = i + 1) {
       const member: ClassMemberAst = decl.members[i] as ClassMemberAst;
       if (member.kind === "method") {
@@ -3375,11 +3432,13 @@ export class Lowerer {
     // 4. return this
     const ctorBody: Array<Stmt> = [];
 
-    // Allocate object as a call to $object_alloc pseudo-function
+    // Allocate object as a call to $class_alloc pseudo-function (includes class_id)
+    const classId = this.classIdMap.get(decl.name);
+    const classIdStr = classId !== undefined ? classId.toString() : "0";
     const allocExpr: CallExpr = {
       kind: ExprKind.Call,
       ty: ANY_TYPE,
-      callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: "$object_alloc_" + fieldNames.length } as FuncRefExpr,
+      callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: "$class_alloc_" + classIdStr + "_" + fieldNames.length } as FuncRefExpr,
       args: [],
     };
     ctorBody.push({
@@ -4007,6 +4066,75 @@ export class Lowerer {
       this.scope.varClassMap.set(varName, ifaceName);
       this.scope.fieldLayouts.set(varName, classInfo.fieldMap);
     }
+  }
+
+  // Generate an IfExpr-based dispatch for an interface method call.
+  // objExpr: the already-lowered object expression (the receiver)
+  // interfaceName: the interface type name
+  // methodName: the method being called on the interface
+  // args: already-lowered argument expressions (NOT including 'this')
+  // Returns an IfExpr tree that reads class_id and dispatches, or null if not possible.
+  private generateInterfaceDispatch(objExpr: Expr, interfaceName: string, methodName: string, args: Array<Expr>): Expr | null {
+    const implementors = this.interfaceImplementors.get(interfaceName);
+    if (implementors === undefined || implementors.length === 0) return null;
+
+    // Build dispatch: nested IfExpr checking class_id against each implementor
+    // $get_class_id(obj) is a pseudo-call that codegen expands to reading class_id from ObjectHeader
+    const getClassIdExpr: CallExpr = {
+      kind: ExprKind.Call,
+      ty: NUMBER_TYPE,
+      callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: 0, name: "$get_class_id" } as FuncRefExpr,
+      args: [objExpr],
+    };
+
+    // Start from the last implementor and build up the if-else chain
+    let elseExpr: Expr = { kind: ExprKind.Undefined, ty: UNDEFINED_TYPE } as UndefinedExpr;
+
+    for (let i = implementors.length - 1; i >= 0; i = i - 1) {
+      const className = implementors[i];
+      const classId = this.classIdMap.get(className);
+      if (classId === undefined) continue;
+
+      const classInfo = this.lookupClassInfo(className);
+      if (classInfo === null) continue;
+
+      const funcName = classInfo.methods.get(methodName);
+      if (funcName === undefined) continue;
+
+      const funcId = this.lookupFunction(funcName);
+      const retType = this.lookupFuncReturnType(funcName);
+
+      // Build call: ClassName$method(obj, args...)
+      const callArgs: Array<Expr> = [objExpr];
+      for (let a = 0; a < args.length; a = a + 1) {
+        callArgs.push(args[a]);
+      }
+      const callExpr: CallExpr = {
+        kind: ExprKind.Call,
+        ty: retType,
+        callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: funcId !== null ? funcId : 0, name: funcName } as FuncRefExpr,
+        args: callArgs,
+      };
+
+      // Condition: $get_class_id(obj) == classId
+      const condition: CompareExpr = {
+        kind: ExprKind.Compare,
+        ty: BOOLEAN_TYPE,
+        op: CompareOp.Eq,
+        left: getClassIdExpr,
+        right: { kind: ExprKind.Number, ty: NUMBER_TYPE, value: classId } as NumberExpr,
+      };
+
+      elseExpr = {
+        kind: ExprKind.If,
+        ty: retType,
+        condition: condition,
+        thenExpr: callExpr,
+        elseExpr: elseExpr,
+      } as IfExpr;
+    }
+
+    return elseExpr;
   }
 
   private registerInterfaceFromDecl(decl: InterfaceDeclAst): void {

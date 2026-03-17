@@ -409,6 +409,7 @@ export interface ClassDeclAst extends AstStmt {
   superClass: string | null;
   typeParams: Array<string> | null;
   members: Array<ClassMemberAst>;
+  implementsInterfaces: Array<string> | null;
 }
 
 export interface EnumMemberAst {

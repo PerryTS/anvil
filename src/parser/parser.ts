@@ -847,11 +847,13 @@ export class Parser {
       }
     }
 
-    // Skip 'implements'
+    // Parse 'implements' clause
+    let implementsInterfaces: Array<string> | null = null;
     if (this.eat(TokenKind.Implements)) {
-      this.expect(TokenKind.Identifier); // interface name
+      implementsInterfaces = [];
+      implementsInterfaces.push(this.expect(TokenKind.Identifier).value);
       while (this.eat(TokenKind.Comma)) {
-        this.expect(TokenKind.Identifier);
+        implementsInterfaces.push(this.expect(TokenKind.Identifier).value);
       }
     }
 
@@ -865,6 +867,7 @@ export class Parser {
     return {
       kind: AstStmtKind.ClassDecl, line: tok.line, col: tok.col,
       name: name, superClass: superClass, typeParams: typeParams, members: members,
+      implementsInterfaces: implementsInterfaces,
     };
   }
 

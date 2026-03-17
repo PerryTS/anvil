@@ -1483,6 +1483,29 @@ function compileCall(ctx: CompilerContext, block: LLBlock, expr: CallExpr): [LLB
       return [block, boxPointer(block, objPtr)];
     }
 
+    // Handle $class_alloc_CID_N pseudo-function (class constructor with class_id)
+    if (funcRef.name.startsWith("$class_alloc_")) {
+      const parts = funcRef.name.substring(13);  // extract "CID_N" from "$class_alloc_CID_N"
+      const sepIdx = parts.indexOf("_");
+      const classId = parts.substring(0, sepIdx);
+      const fieldCount = parts.substring(sepIdx + 1);
+      const objPtr = block.call(PTR, "js_object_alloc", [[I32, classId], [I32, fieldCount]]);
+      return [block, boxPointer(block, objPtr)];
+    }
+
+    // Handle $get_class_id pseudo-function: read class_id from ObjectHeader
+    if (funcRef.name === "$get_class_id") {
+      const objVal = argVals[0][0];
+      const objPtr = unboxPointer(block, objVal);
+      // ObjectHeader layout: { u32 object_type, u32 class_id, ... }
+      // class_id is at byte offset 4 (second u32 field)
+      const classIdPtr = block.nextReg();
+      block.emitRaw(classIdPtr + " = getelementptr i8, ptr " + objPtr + ", i32 4");
+      const classIdI32 = block.load(I32, classIdPtr);
+      const classIdF64 = block.uitofp(I32, classIdI32, DOUBLE);
+      return [block, classIdF64];
+    }
+
     // Handle JSON.parse(str) -> JSValue (returns i64 bits, bitcast to double)
     if (funcRef.name === "js_json_parse") {
       const strVal = argVals[0][0];
