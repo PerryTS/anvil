@@ -121,6 +121,8 @@ export class Lowerer {
   private objMethodFields: Map<string, boolean>;
   // Temporary: field layout to set on 'this' in the next arrow being lowered (for object literal methods)
   private pendingThisLayout: Map<string, number> | null;
+  // Module-level boxed vars: 'var' declarations that need boxing for closure capture at top level
+  private moduleBoxedVars: Map<string, boolean>;
 
   constructor() {
     this.nextLocalId = 0;
@@ -150,6 +152,7 @@ export class Lowerer {
     this.boxedCaptureNames = new Map();
     this.objMethodFields = new Map();
     this.pendingThisLayout = null;
+    this.moduleBoxedVars = new Map();
   }
 
   setSourceDir(dir: string): void {
@@ -328,12 +331,25 @@ export class Lowerer {
       }
     }
 
-    // Detect boxed vars at module level — but don't actually box them.
-    // Module-level variables are LLVM globals, which are already shared mutable cells.
-    // Functions access them via GlobalGet/GlobalSet, not CaptureGet/CaptureSet,
-    // so wrapping their init values in $box_alloc would break comparisons
-    // (the global would hold a box pointer instead of the actual value).
+    // Detect 'var' declarations at module level that need boxing for closure capture.
+    // Only 'var' needs boxing — let/const module-level vars are LLVM globals which are
+    // already shared mutable cells accessed via GlobalGet/GlobalSet.
+    // But 'var' in for-loop inits creates a local that closures capture by value,
+    // so we need boxing to share the mutable cell correctly (e.g., var loop closures).
+    const moduleDeclKinds: Map<string, string> = new Map();
+    this.boxCollectDecls(sourceFile.statements, moduleDeclKinds);
+    const moduleBoxedAll: Map<string, boolean> = new Map();
+    this.boxScanStmts(sourceFile.statements, moduleDeclKinds, moduleBoxedAll, false);
+    // Filter: only box 'var' declarations (let/const at module level don't need boxing)
     this.boxedVars = new Map();
+    this.moduleBoxedVars = new Map();
+    const boxedKeys = Array.from(moduleBoxedAll.keys());
+    for (let bk = 0; bk < boxedKeys.length; bk = bk + 1) {
+      if (moduleDeclKinds.get(boxedKeys[bk]) === "var") {
+        this.boxedVars.set(boxedKeys[bk], true);
+        this.moduleBoxedVars.set(boxedKeys[bk], true);
+      }
+    }
 
     // Second pass: lower all statements
     for (let i = 0; i < sourceFile.statements.length; i = i + 1) {
@@ -1218,7 +1234,12 @@ export class Lowerer {
     if (this.inFunction && this.moduleLocals.has(expr.name)) {
       this.addModuleGlobal(expr.name);
       const ty = this.lookupLocalType(expr.name);
-      return { kind: ExprKind.GlobalGet, ty: ty, name: expr.name } as GlobalGetExpr;
+      const globalGet: GlobalGetExpr = { kind: ExprKind.GlobalGet, ty: ty, name: expr.name };
+      // If this module-level var is boxed, unwrap the box
+      if (this.moduleBoxedVars.has(expr.name)) {
+        return this.makeBoxGet(globalGet);
+      }
+      return globalGet;
     }
 
     // Check if it's an imported global variable from another module
@@ -1505,6 +1526,12 @@ export class Lowerer {
         this.addModuleGlobal(ident.name);
         const one: NumberExpr = { kind: ExprKind.Number, ty: NUMBER_TYPE, value: 1 };
         const binOp = expr.op === "++" ? BinaryOp.Add : BinaryOp.Sub;
+        if (this.moduleBoxedVars.has(ident.name)) {
+          const globalGet: GlobalGetExpr = { kind: ExprKind.GlobalGet, ty: ANY_TYPE, name: ident.name };
+          const get = this.makeBoxGet(globalGet);
+          const add: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: binOp, left: get, right: one };
+          return this.makeBoxSet({ kind: ExprKind.GlobalGet, ty: ANY_TYPE, name: ident.name } as GlobalGetExpr, add);
+        }
         const get: GlobalGetExpr = { kind: ExprKind.GlobalGet, ty: NUMBER_TYPE, name: ident.name };
         const add: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: binOp, left: get, right: one };
         return { kind: ExprKind.GlobalSet, ty: NUMBER_TYPE, name: ident.name, value: add } as GlobalSetExpr;
@@ -1553,6 +1580,13 @@ export class Lowerer {
         const incOp = expr.op === "++" ? BinaryOp.Add : BinaryOp.Sub;
         const reverseOp = expr.op === "++" ? BinaryOp.Sub : BinaryOp.Add;
         const one2: NumberExpr = { kind: ExprKind.Number, ty: NUMBER_TYPE, value: 1 };
+        if (this.moduleBoxedVars.has(ident.name)) {
+          const globalGet: GlobalGetExpr = { kind: ExprKind.GlobalGet, ty: ANY_TYPE, name: ident.name };
+          const get = this.makeBoxGet(globalGet);
+          const incExpr: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: incOp, left: get, right: one };
+          const setExpr = this.makeBoxSet({ kind: ExprKind.GlobalGet, ty: ANY_TYPE, name: ident.name } as GlobalGetExpr, incExpr);
+          return { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: reverseOp, left: setExpr, right: one2 } as BinaryExpr;
+        }
         const get: GlobalGetExpr = { kind: ExprKind.GlobalGet, ty: NUMBER_TYPE, name: ident.name };
         const incExpr: BinaryExpr = { kind: ExprKind.Binary, ty: NUMBER_TYPE, op: incOp, left: get, right: one };
         const setExpr: GlobalSetExpr = { kind: ExprKind.GlobalSet, ty: NUMBER_TYPE, name: ident.name, value: incExpr };
@@ -2007,6 +2041,31 @@ export class Lowerer {
           args: args,
         } as MethodCallExpr;
       }
+      // Class method dispatch for chained member access (e.g., new Box(5).map(fn))
+      // Must be checked BEFORE array/map/set method fallback, since method names like
+      // "map" exist in both class methods and Array.prototype
+      const objClassName = this.resolveExprClassName(member.object);
+      if (objClassName !== null) {
+        const objClassInfo = this.lookupClassInfo(objClassName);
+        if (objClassInfo !== null) {
+          const methodFuncName = objClassInfo.methods.get(member.property);
+          if (methodFuncName !== undefined) {
+            const funcId = this.lookupFunction(methodFuncName);
+            const args: Array<Expr> = [objExpr];  // 'this' is first arg
+            for (let i = 0; i < expr.args.length; i = i + 1) {
+              args.push(this.lowerExpr(expr.args[i]));
+            }
+            const retType = this.lookupFuncReturnType(methodFuncName);
+            return {
+              kind: ExprKind.Call,
+              ty: retType,
+              callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: funcId !== null ? funcId : 0, name: methodFuncName } as FuncRefExpr,
+              args: args,
+            } as CallExpr;
+          }
+        }
+      }
+
       // When the object is known to be a string, prefer string methods over array methods
       // (indexOf, includes, slice exist in both lists)
       if (this.isStringMethod(member.property) && objExpr.ty.kind === TypeKind.String) {
@@ -2057,30 +2116,6 @@ export class Lowerer {
           method: "toString",
           args: [],
         } as MethodCallExpr;
-      }
-
-      // Class method dispatch for chained member access (e.g., this.scanner.scan())
-      // Resolve the class type of the object expression
-      const objClassName = this.resolveExprClassName(member.object);
-      if (objClassName !== null) {
-        const objClassInfo = this.lookupClassInfo(objClassName);
-        if (objClassInfo !== null) {
-          const methodFuncName = objClassInfo.methods.get(member.property);
-          if (methodFuncName !== undefined) {
-            const funcId = this.lookupFunction(methodFuncName);
-            const args: Array<Expr> = [objExpr];  // 'this' is first arg
-            for (let i = 0; i < expr.args.length; i = i + 1) {
-              args.push(this.lowerExpr(expr.args[i]));
-            }
-            const retType = this.lookupFuncReturnType(methodFuncName);
-            return {
-              kind: ExprKind.Call,
-              ty: retType,
-              callee: { kind: ExprKind.FuncRef, ty: ANY_TYPE, funcId: funcId !== null ? funcId : 0, name: methodFuncName } as FuncRefExpr,
-              args: args,
-            } as CallExpr;
-          }
-        }
       }
     }
 
@@ -2717,6 +2752,9 @@ export class Lowerer {
       // Module-level variable assignment from within a function
       if (this.inFunction && this.moduleLocals.has(ident.name)) {
         this.addModuleGlobal(ident.name);
+        if (this.moduleBoxedVars.has(ident.name)) {
+          return this.makeBoxSet({ kind: ExprKind.GlobalGet, ty: ANY_TYPE, name: ident.name } as GlobalGetExpr, value);
+        }
         return { kind: ExprKind.GlobalSet, ty: value.ty, name: ident.name, value: value } as GlobalSetExpr;
       }
       // Check capture-aware lookup for closure variables
@@ -2993,6 +3031,16 @@ export class Lowerer {
         const setType: ObjectType = makeObjectType(new Map());
         setType.isSet = true;
         return setType;
+      }
+      // Check if it's a known class type (e.g., Box<U> -> ObjectType with interfaceName "Box")
+      // Also check for constructor function (ClassName$new) since classInfos may not be
+      // populated yet during preRegisterClass
+      const classInfo = this.lookupClassInfo(gen.name);
+      const ctorFunc = this.lookupFunction(gen.name + "$new");
+      if (classInfo !== null || ctorFunc !== null) {
+        const objType: ObjectType = makeObjectType(new Map());
+        objType.interfaceName = gen.name;
+        return objType;
       }
       return ANY_TYPE;
     }
